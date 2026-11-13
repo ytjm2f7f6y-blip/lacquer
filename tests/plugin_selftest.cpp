@@ -123,11 +123,53 @@ int main() {
         for (const auto& mv : r.moves) std::printf("        %-9s %-24s %s\n", mv.module.c_str(), mv.what.c_str(), mv.key ? p.sectionName(mv.key).toRawUTF8() : "song");
         CHECK(r.any && r.keyHeard[0] && r.keyHeard[2] && r.keyHeard[3] && !r.keyHeard[1], "the assistant heard the song, the verses and the choruses (and no intro)");
         CHECK(r.knee.known, "and found where loudness starts to cost the drums");
+        double mixGap = 0, masterGap = 0;
+        const bool gap = p.sectionGap(2, mixGap, masterGap);
+        std::printf("      choruses over verses: %.1f dB in the mix, %.1f dB mastered\n", mixGap, masterGap);
+        CHECK(r.contrast.loud == 3 && gap && mixGap > masterGap, "it measured how much the limiter evens the choruses out against the verses");
+        const float verseT = p.valuesFor(2)[lTarget];
+        p.editSongMap([&](SongMap& sm) { sm.has[2][lTarget] = true; sm.val[2][lTarget] = verseT - 1.5f; });
+        double mix2 = 0, master2 = 0;
+        p.sectionGap(2, mix2, master2);
+        p.editSongMap([&](SongMap& sm) { sm.has[2][lTarget] = false; });
+        CHECK(std::abs(mix2 - mixGap) < 1e-9 && master2 > masterGap + 1.0, "a verse target 1.5 dB under the song widens the gap again");
 
-        // ---- the lit key follows the song while it plays
+        // ---- the lit key follows the song while it plays (FOLLOW), until you press a key
         int seen[6] = {};
-        play(p, head, song, block, [&](int bar) { if (bar == 4 || bar == 12) seen[bar == 4 ? 0 : 1] = p.litKey(); });
+        bool followOff = false;
+        play(p, head, song, block, [&](int bar) {
+            if (bar == 4 || bar == 12) seen[bar == 4 ? 0 : 1] = p.litKey();
+            if (bar == 18) { p.tapKey(2); followOff = !p.follow(); }
+            if (bar == 26) seen[2] = p.litKey();
+            if (bar == 27) p.setFollow(true);
+            if (bar == 28) seen[3] = p.litKey();
+        });
         CHECK(seen[0] == 2 && seen[1] == 3, "while it plays, the lit key is the section it's in");
+        CHECK(followOff && seen[2] == 2 && seen[3] == 3, "pressing a key while it plays turns FOLLOW off and holds that section; FOLLOW picks the song back up");
+
+        // ---- marks made with the transport stopped, split and joined
+        {
+            juce::AudioBuffer<float> io(2, block);
+            juce::MidiBuffer midi;
+            io.clear();
+            head.playing = false;
+            head.ppq = 41.5;   // in bar 11
+            p.processBlock(io, midi);
+            const int before = p.songMap().count;
+            p.setMarking(true);
+            p.tapKey(5);
+            p.setMarking(false);
+            const auto& mm = p.songMap();
+            int at = -1;
+            for (int i = 0; i < mm.count; ++i) if (std::abs(mm.marks[i].ppq - 40.0) < 1e-6) at = i;
+            CHECK(mm.count == before + 1 && at >= 0 && mm.marks[at].key == 5, "stopped, with MARK lit, a key marks the bar the playhead is in");
+            const int half = p.splitMark(at);
+            CHECK(half == at + 1 && p.songMap().count == before + 2 && std::abs(p.songMap().marks[half].ppq - 52.0) < 1e-6 && p.songMap().marks[half].key == 5,
+                  "SPLIT halves a block on a bar line");
+            p.joinMark(half);
+            p.removeMark(at);
+            CHECK(p.songMap().count == before, "JOIN folds it back");
+        }
 
         // ---- a section's own setting
         const float glue = p.songValue(dGlue);
@@ -135,9 +177,13 @@ int main() {
         p.setShown(dGlue, glue + 3);
         CHECK(p.songMap().has[3][dGlue] && std::abs(p.songValue(dGlue) - glue) < 1e-6f, "turning a knob with the chorus lit changes the chorus, not the song");
         CHECK(p.shownIsOwn(dGlue) && std::abs(p.shownValue(dGlue) - (glue + 3)) < 1e-5f, "and the knob shows the chorus's own value");
-        p.setShown(lTarget, -12);
-        CHECK(!p.songMap().has[3][lTarget] && std::abs(p.songValue(lTarget) + 12) < 0.01f, "loudness is song-wide, even with a section lit");
-        p.setSong(lTarget, def(lTarget).def);
+        const float songTarget = p.songValue(lTarget);
+        p.setShown(lTarget, songTarget - 1.5f);
+        p.setShown(lCeiling, -0.5f);
+        CHECK(p.songMap().has[3][lTarget] && std::abs(p.songValue(lTarget) - songTarget) < 1e-4f, "with a section lit, TARGET is that section's own");
+        CHECK(!p.songMap().has[3][lCeiling] && std::abs(p.songValue(lCeiling) + 0.5f) < 0.01f, "while the ceiling stays song-wide");
+        p.resetShown(lTarget);
+        p.setSong(lCeiling, def(lCeiling).def);
         p.setEditKey(0);
         CHECK(std::abs(p.shownValue(dGlue) - glue) < 1e-6f, "with SONG lit the knob shows the song's value");
 
@@ -177,7 +223,7 @@ int main() {
         q.prepareToPlay(sr, block);
         q.setStateInformation(state.getData(), int(state.getSize()));
         const auto& qm = q.songMap();
-        CHECK(qm.count == 4 && qm.has[3][dGlue] && std::abs(qm.val[3][dGlue] - (glue + 3)) < 1e-4f && q.sectionName(3) == "hook", "marks, sections' own settings and names come back");
+        CHECK(qm.count == 4 && q.result().contrast.loud == 3 && qm.has[3][dGlue] && std::abs(qm.val[3][dGlue] - p.songMap().val[3][dGlue]) < 1e-4f && q.sectionName(3) == "hook", "marks, sections' own settings and names come back");
         CHECK(q.result().any && q.result().moves.size() == r.moves.size() && q.loudnessKnown() && q.result().knee.known, "and so do the assistant's findings and the learnt loudness");
 
         // ---- presets

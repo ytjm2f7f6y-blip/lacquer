@@ -57,12 +57,15 @@ struct KeyStats {
 
 struct SongStats {
     KeyStats key[kNumKeys];   // [0] the whole song (every second counts here too)
+    // The engine's own loudness per key during the pass, at the limiter's input and at the output
+    // (with the drive in use kept alongside): what the limiter does to each section.
+    KeyStats limIn[kNumKeys], out[kNumKeys];
     double dc[2]{}, samples = 0;
     double corrMin = 1;
     double firstLevelDb = -120, lastLevelDb = -120;   // the first 5 ms and the last 50 ms heard
     bool started = false;
     double subRatioDb = -60;    // filled in by summarise()
-    void clear() { for (auto& k : key) k.clear(); dc[0] = dc[1] = 0; samples = 0; corrMin = 1; firstLevelDb = lastLevelDb = -120; started = false; }
+    void clear() { for (auto& k : key) k.clear(); for (auto& k : limIn) k.clear(); for (auto& k : out) k.clear(); dc[0] = dc[1] = 0; samples = 0; corrMin = 1; firstLevelDb = lastLevelDb = -120; started = false; }
 };
 
 class Analyser {

@@ -99,6 +99,7 @@ LacquerProcessor::LacquerProcessor()
         raw_[size_t(p)] = apvts.getRawParameterValue(def(p).id);
         jassert(params_[size_t(p)] != nullptr);
     }
+    for (int k = 1; k <= kSections; ++k) sectionNames_[size_t(k - 1)] = juce::String(defaultKeyName(k));
     engine_.prepare(48000, 512);
     loadTaste();
     rebuildTarget();
@@ -207,7 +208,7 @@ void LacquerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
 // ---------------------------------------------------------------------------
 // Keys and values
 int LacquerProcessor::litKey() const {
-    if (playing_.load() && songMap().count > 0) return meters().key.load();
+    if (follow_.load() && playing_.load() && songMap().count > 0) return meters().key.load();
     return engine_.editKey_.load();
 }
 
@@ -262,8 +263,9 @@ void LacquerProcessor::setMarking(bool on) {
 
 void LacquerProcessor::tapKey(int key) {
     key = juce::jlimit(0, kNumKeys - 1, key);
+    const double q = quartersPerBar_.load(), at = ppq_.load(), last = lastBarPpq_.load();
     if (marking_ && playing_.load()) {
-        const double q = quartersPerBar_.load(), at = ppq_.load(), last = lastBarPpq_.load();
+        // The bar line nearest the tap: a late tap still lands on the bar that just started.
         double mark = (at - last >= 0 && at - last < 4 * q) ? (at - last < q * 0.5 ? last : last + q) : std::round(at / q) * q;
         mark = std::max(0.0, mark);
         const double from = std::min(lastTapPpq_, mark - 1e-6);
@@ -273,9 +275,52 @@ void LacquerProcessor::tapKey(int key) {
             m.addMark(mark, key);
         });
         lastTapPpq_ = mark;
+    } else if (marking_) {
+        addMarkAtPlayhead(key);   // stopped: the bar the playhead is in
+    } else if (playing_.load() && songMap().count > 0) {
+        follow_.store(false);     // hold this section while the song plays on
     }
     engine_.editKey_.store(key);
     bump();
+}
+
+void LacquerProcessor::setFollow(bool on) {
+    follow_.store(on);
+    if (on && playing_.load() && songMap().count > 0) engine_.editKey_.store(meters().key.load());
+    bump();
+}
+
+int LacquerProcessor::addMarkAtPlayhead(int key) {
+    const double q = quartersPerBar_.load(), at = ppq_.load();
+    const double mark = std::max(0.0, std::floor(at / q + 1e-6) * q);
+    editSongMap([&](SongMap& m) { m.addMark(mark, juce::jlimit(0, kNumKeys - 1, key)); });
+    bump();
+    const auto& m = songMap();
+    for (int i = 0; i < m.count; ++i) if (std::abs(m.marks[i].ppq - mark) < 1e-6) return i;
+    return -1;
+}
+
+double LacquerProcessor::blockEnd(int index) const {
+    const auto& m = songMap();
+    if (index + 1 < m.count) return m.marks[index + 1].ppq;
+    return songEndPpq();
+}
+
+int LacquerProcessor::splitMark(int index) {
+    const auto& m = songMap();
+    if (index < 0 || index >= m.count) return -1;
+    const double q = quartersPerBar_.load(), a = m.marks[index].ppq, b = blockEnd(index);
+    double mid = std::round((a + b) / 2 / q) * q;
+    if (mid <= a + 1e-6) mid = a + q;
+    if (mid >= b - 1e-6) return -1;   // a single bar: nothing to split
+    const int key = m.marks[index].key;
+    editSongMap([&](SongMap& mm) { mm.addMark(mid, key); });
+    bump();
+    return index + 1;
+}
+
+void LacquerProcessor::joinMark(int index) {
+    removeMark(index);
 }
 
 void LacquerProcessor::moveMark(int index, double ppq) {
@@ -309,8 +354,8 @@ double LacquerProcessor::songEndPpq() const {
 }
 
 void LacquerProcessor::setSectionName(int key, const juce::String& n) {
-    if (key < 1 || key > 5) return;
-    sectionNames_[size_t(key - 1)] = n.trim().substring(0, 14).toLowerCase();
+    if (key < 1 || key > kSections || n.trim().isEmpty()) return;
+    sectionNames_[size_t(key - 1)] = n.trim().substring(0, 16).toLowerCase();
     bump();
 }
 
@@ -365,7 +410,9 @@ void LacquerProcessor::runAssistant() {
     Values sec[kNumKeys];
     const Values song = songValues();
     for (int k = 0; k < kNumKeys; ++k) sec[k] = valuesFor(k);
-    result_ = assist(lastStats_, target_, song, sec, taste_, learn);
+    std::string names[kNumKeys];
+    for (int k = 0; k < kNumKeys; ++k) names[k] = sectionName(k).toStdString();
+    result_ = assist(lastStats_, target_, song, sec, taste_, learn, names);
     engine_.setKnee(result_.knee.kneeLufs, result_.knee.known);
     if (learn) saveTaste();
     bump();
@@ -419,6 +466,23 @@ int LacquerProcessor::ideaCount(int module) const {
     int n = 0;
     for (const auto& m : result_.moves) if (m.taken && m.module == names[module]) ++n;
     return n;
+}
+
+double LacquerProcessor::driveFor(int key) const {
+    double t = valuesFor(key)[lTarget];
+    if (songValue(lGuard) >= 0.5f && result_.knee.known && t > result_.knee.kneeLufs) t = result_.knee.kneeLufs;
+    return t - engine_.measuredInput();
+}
+
+bool LacquerProcessor::sectionGap(int k, double& mix, double& master) const {
+    const auto& c = result_.contrast;
+    if (c.loud <= 0 || k <= 0 || k >= kNumKeys || !c.ok[k]) return false;
+    mix = c.mixGap[k];
+    // The drives have moved apart (or together) since the pass by this much; the limiter takes a
+    // little of any change back, so count nine tenths of it.
+    const double moved = (driveFor(c.loud) - c.drive[c.loud]) - (driveFor(k) - c.drive[k]);
+    master = c.masterGap[k] + 0.9 * moved;
+    return true;
 }
 
 void LacquerProcessor::loadTaste() {
@@ -562,6 +626,11 @@ void LacquerProcessor::setBlind(bool on) {
     bump();
 }
 
+juce::StringArray LacquerProcessor::sectionVocabulary() {
+    return {"intro", "verse", "pre-chorus", "chorus", "post-chorus", "hook", "bridge", "middle 8", "breakdown", "build",
+            "drop", "solo", "instrumental", "interlude", "refrain", "outro", "tag", "coda"};
+}
+
 juce::StringArray LacquerProcessor::factoryPresets() {
     return {"room to breathe", "loud and proud", "quiet storm", "cut for vinyl", "club weight", "flat start"};
 }
@@ -628,7 +697,8 @@ void LacquerProcessor::getStateInformation(juce::MemoryBlock& destData) {
     }
     sec.appendChild(marks, nullptr);
     sec.appendChild(snapshot().getChildWithName("own").createCopy(), nullptr);
-    for (int k = 1; k <= 5; ++k) sec.setProperty("name" + juce::String(k), sectionNames_[size_t(k - 1)], nullptr);
+    for (int k = 1; k <= kSections; ++k) sec.setProperty("name" + juce::String(k), sectionNames_[size_t(k - 1)], nullptr);
+    sec.setProperty("follow", follow(), nullptr);
     sec.setProperty("editKey", editKey(), nullptr);
     root.appendChild(sec, nullptr);
     // The assistant.
@@ -650,6 +720,12 @@ void LacquerProcessor::getStateInformation(juce::MemoryBlock& destData) {
         r.setProperty("knee", result_.knee.kneeLufs, nullptr);
         r.setProperty("kneeIn", result_.knee.inputLufs, nullptr);
         r.setProperty("kept", curveToText(result_.knee.kept, 101), nullptr);
+        const auto& c = result_.contrast;
+        r.setProperty("loud", c.loud, nullptr);
+        for (int k = 1; k < kNumKeys; ++k)
+            if (c.ok[k] || k == c.loud)
+                r.setProperty("gap" + juce::String(k), juce::String(c.mixGap[k], 3) + "," + juce::String(c.masterGap[k], 3) + "," + juce::String(c.drive[k], 3) + "," +
+                              juce::String(c.seconds[k], 1) + "," + (c.ok[k] ? "1" : "0"), nullptr);
         for (const auto& mv : result_.moves) {
             juce::ValueTree t("move");
             t.setProperty("key", mv.key, nullptr); t.setProperty("p", def(mv.param).id, nullptr); t.setProperty("abs", mv.absolute, nullptr);
@@ -693,7 +769,8 @@ void LacquerProcessor::setStateInformation(const void* data, int sizeInBytes) {
     snap.appendChild(sec.getChildWithName("own").createCopy(), nullptr);
     snap.appendChild(sec.getChildWithName("marks").createCopy(), nullptr);
     restore(snap, true);
-    for (int k = 1; k <= 5; ++k) if (sec.hasProperty("name" + juce::String(k))) sectionNames_[size_t(k - 1)] = sec.getProperty("name" + juce::String(k)).toString();
+    for (int k = 1; k <= kSections; ++k) if (sec.hasProperty("name" + juce::String(k))) sectionNames_[size_t(k - 1)] = sec.getProperty("name" + juce::String(k)).toString();
+    follow_.store(bool(sec.getProperty("follow", true)));
     engine_.editKey_.store(juce::jlimit(0, kNumKeys - 1, int(sec.getProperty("editKey", 0))));
     const auto as = root.getChildWithName("assistant");
     if (bool(as.getProperty("measuredKnown", false))) engine_.setMeasuredInput(double(as.getProperty("measured", -14.0)), true);
@@ -717,6 +794,14 @@ void LacquerProcessor::setStateInformation(const void* data, int sizeInBytes) {
         result_.knee.inputLufs = double(r.getProperty("kneeIn", -20.0));
         const auto kept = juce::StringArray::fromTokens(r.getProperty("kept").toString(), ",", "");
         for (int i = 0; i < std::min(101, kept.size()); ++i) result_.knee.kept[i] = kept[i].getDoubleValue();
+        result_.contrast.loud = int(r.getProperty("loud", -1));
+        for (int k = 1; k < kNumKeys; ++k) {
+            const auto g = juce::StringArray::fromTokens(r.getProperty("gap" + juce::String(k)).toString(), ",", "");
+            if (g.size() != 5) continue;
+            result_.contrast.mixGap[k] = g[0].getDoubleValue(); result_.contrast.masterGap[k] = g[1].getDoubleValue();
+            result_.contrast.drive[k] = g[2].getDoubleValue(); result_.contrast.seconds[k] = g[3].getDoubleValue();
+            result_.contrast.ok[k] = g[4] == "1";
+        }
         for (const auto& t : r) {
             if (t.hasType("move")) {
                 Move mv;

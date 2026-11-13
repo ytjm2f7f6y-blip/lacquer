@@ -7,6 +7,7 @@
 
 #include "lq_analysis.hpp"
 
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -92,7 +93,7 @@ inline double toneResponse(double f, const Values& v) {
 // ---------------------------------------------------------------------------
 // Moves.
 struct Move {
-    int key = 0;            // 0 the whole song, 1..5 one section
+    int key = 0;            // 0 the whole song, 1..8 one section
     int param = 0;
     bool absolute = false;  // sets a value (rumble's frequency) rather than adding to it
     float full = 0;         // the whole suggested change (or the value, for absolute moves)
@@ -104,7 +105,7 @@ struct Move {
     bool beforeOwn = false, beforeExtraOwn = false;   // the section had its own value before (else it followed the song)
     int kind = 0;           // for LEARN: which kind of move
 };
-enum MoveKind { mkLow, mkPres, mkAir, mkHarsh, mkRumble, mkMono, mkWidth, mkLoud, mkGlue, mkRes, kNumMoveKinds };
+enum MoveKind { mkLow, mkPres, mkAir, mkHarsh, mkRumble, mkMono, mkWidth, mkLoud, mkGlue, mkRes, mkLift, kNumMoveKinds };
 
 struct Taste {   // how often each kind of move was taken and skipped
     float taken[kNumMoveKinds]{}, skipped[kNumMoveKinds]{};
@@ -120,19 +121,6 @@ struct Knee {
     double kept[101]{};   // transients kept (%) from -16 to -6 LUFS in 0.1 steps
 };
 
-struct Result {
-    bool any = false;
-    double curve[kNumKeys][kBands]{};   // measured, per key
-    bool keyHeard[kNumKeys]{};
-    double keySeconds[kNumKeys]{};
-    double sideLowDb[kNumKeys]{}, widthDb[kNumKeys]{};
-    double subDb = -60, crestDb = 12;
-    Knee knee;
-    std::vector<Move> moves;
-    std::vector<Check> checks;
-    std::vector<std::string> mixNotes;
-};
-
 inline double knob(float x) { return std::round(x * 10.0) / 10.0; }
 inline std::string fmt1(double x, bool sign = false) {
     char b[32];
@@ -141,7 +129,52 @@ inline std::string fmt1(double x, bool sign = false) {
     if (s[0] == '-') s = "\xe2\x88\x92" + s.substr(1);   // a real minus
     return s;
 }
-inline const char* keyName(int k) { static const char* n[kNumKeys] = {"song", "intro", "verse", "chorus", "bridge", "outro"}; return n[std::max(0, std::min(k, 5))]; }
+// The section keys' names until you change them.
+inline std::string defaultKeyName(int k) {
+    static const char* n[kNumKeys] = {"song", "intro", "verse", "pre-chorus", "chorus", "bridge", "solo", "breakdown", "outro"};
+    return n[std::max(0, std::min(k, kNumKeys - 1))];
+}
+inline std::string plural(const std::string& s) {
+    auto ends = [&](const char* e) { const size_t n = std::strlen(e); return s.size() >= n && s.compare(s.size() - n, n, e) == 0; };
+    if (s.empty()) return s;
+    if (ends("s") || ends("x") || ends("ch") || ends("sh")) return s + "es";
+    return s + "s";
+}
+
+// What the limiter does to one section, from the pass: its loudness going in and coming out, and
+// the drive it was given. loss = in + drive - out.
+struct SectionLevel { bool ok = false; double in = -70, out = -70, drive = 0, loss = 0, seconds = 0; };
+inline SectionLevel sectionLevel(const SongStats& st, int k) {
+    SectionLevel s;
+    const auto& a = st.limIn[k];
+    const auto& b = st.out[k];
+    s.seconds = std::min(a.seconds, b.seconds);
+    if (s.seconds < 6) return s;
+    s.in = a.integrated(); s.out = b.integrated(); s.drive = b.gatedAuxMean();
+    s.ok = s.in > -60 && s.out > -60;
+    s.loss = s.in + s.drive - s.out;
+    return s;
+}
+// The loudest heard section, and how far each other one sits under it, in the mix and after the limiter.
+struct Contrast { int loud = -1; double mixGap[kNumKeys]{}, masterGap[kNumKeys]{}, drive[kNumKeys]{}, seconds[kNumKeys]{}; bool ok[kNumKeys]{}; };
+inline Contrast contrastFrom(const SongStats& st) {
+    Contrast c;
+    SectionLevel lv[kNumKeys];
+    for (int k = 1; k < kNumKeys; ++k) {
+        lv[k] = sectionLevel(st, k);
+        if (lv[k].ok && lv[k].seconds >= 8 && (c.loud < 0 || lv[k].in > lv[c.loud].in)) c.loud = k;
+    }
+    if (c.loud < 0) return c;
+    c.drive[c.loud] = lv[c.loud].drive; c.seconds[c.loud] = lv[c.loud].seconds;
+    for (int k = 1; k < kNumKeys; ++k) {
+        if (!lv[k].ok || k == c.loud) continue;
+        c.ok[k] = true;
+        c.drive[k] = lv[k].drive; c.seconds[k] = lv[k].seconds;
+        c.mixGap[k] = lv[c.loud].in - lv[k].in;
+        c.masterGap[k] = lv[c.loud].out - lv[k].out;
+    }
+    return c;
+}
 
 // The loudness knee: how much of the drums' snap survives as the drive goes up, from the
 // histogram of 10 ms peaks. A window loses what the limiter takes off it past the first dB.
@@ -172,10 +205,26 @@ inline Knee kneeFrom(const KeyStats& song, double ceilingDb, double clip) {
 
 inline int destinationLufs(int dest) { static const int d[4] = {-10, -9, -12, -8}; return d[std::max(0, std::min(dest, 3))]; }
 
+struct Result {
+    bool any = false;
+    double curve[kNumKeys][kBands]{};   // measured, per key
+    bool keyHeard[kNumKeys]{};
+    double keySeconds[kNumKeys]{};
+    double sideLowDb[kNumKeys]{}, widthDb[kNumKeys]{};
+    double subDb = -60, crestDb = 12;
+    Knee knee;
+    std::vector<Move> moves;
+    std::vector<Check> checks;
+    std::vector<std::string> mixNotes;
+    Contrast contrast;   // the loudest section against the others, in the mix and after the limiter
+};
+
 // From the pass and the target to moves, checks and notes.
 inline Result assist(const SongStats& st, const Target& tgt, const Values& song, const Values* sectionVals /* [kNumKeys] */,
-                     const Taste& taste, bool useTaste) {
+                     const Taste& taste, bool useTaste, const std::string* names = nullptr /* [kNumKeys] */) {
     Result r;
+    auto keyName = [&](int k) { return names ? names[k] : defaultKeyName(k); };
+    auto many = [&](int k) { return plural(keyName(k)); };
     const auto& all = st.key[0];
     if (all.frames < 8) return r;
     r.any = true;
@@ -226,16 +275,27 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
             if (std::abs(dev) > 4.5) r.mixNotes.push_back(std::string(b.name == std::string("LOW") ? "The low end" : b.name == std::string("AIR") ? "The top end" : "The upper mids") +
                                                           " is " + fmt1(std::abs(dev)) + " dB " + (dev > 0 ? "over" : "under") + " the target. Fix the bulk of it in the mix.");
         }
-        // A section that stands apart from the song gets its own move.
+        // A section that stands apart from the song gets its own move: the two that stand out most
+        // (with eight sections, a move for every one that differs a little would bury the useful ones).
+        int pick[2] = {-1, -1};
+        double score[2] = {0, 0};
         for (int k = 1; k < kNumKeys; ++k) {
-            if (!r.keyHeard[k]) continue;
+            if (!r.keyHeard[k] || r.keySeconds[k] < 8) continue;
             const double dk = avgDev(k, b.f0, b.f1) - avgDev(0, b.f0, b.f1);
-            if (std::abs(dk) > room + 0.4) {
+            if (std::abs(dk) <= room + 0.4) continue;
+            const double sc = std::abs(dk) * std::sqrt(r.keySeconds[k]);
+            if (sc > score[0]) { pick[1] = pick[0]; score[1] = score[0]; pick[0] = k; score[0] = sc; }
+            else if (sc > score[1]) { pick[1] = k; score[1] = sc; }
+        }
+        for (int k : pick) {
+            if (k < 0) continue;
+            const double dk = avgDev(k, b.f0, b.f1) - avgDev(0, b.f0, b.f1);
+            {
                 Move m; m.key = k; m.param = b.param; m.kind = b.kind; m.module = "TONE";
                 m.full = float(clamp(-dk * 0.8, -2.5, 2.5));
                 m.what = std::string(b.name) + "  " + fmt1(m.full, true) + " dB";
-                m.why = std::string("The ") + keyName(k) + "s sit " + (dk > 0 ? "brighter" : "duller") + " here than the rest of the song.";
-                if (b.param == tLow) m.why = std::string("The ") + keyName(k) + "s carry " + (dk > 0 ? "more" : "less") + " low end than the rest of the song.";
+                m.why = "The " + many(k) + " sit " + (dk > 0 ? "brighter" : "duller") + " than the rest of the song.";
+                if (b.param == tLow) m.why = "The " + many(k) + " carry " + (dk > 0 ? "more" : "less") + " low end than the rest of the song.";
                 m.conf = confFor(dk, room, b.kind) - 8;
                 add(m);
             }
@@ -261,7 +321,7 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
                 m.extraParam = cleanIn; m.extraValue = 1;
                 const float base0 = sectionVals ? sectionVals[k][cHarsh] : song[cHarsh];
                 m.what = "HARSH  " + fmt1(base0) + " \xe2\x86\x92 " + fmt1(std::min(10.0f, base0 + m.full));
-                m.why = std::string("The ") + keyName(k) + "s get harsh around 3 to 4 kHz.";
+                m.why = "The " + many(k) + " get harsh around 3 to 4 kHz.";
                 m.conf = confFor(rel, 1.4, mkHarsh);
                 add(m);
                 ++sectionMoves;
@@ -305,13 +365,13 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
     for (int k = 1; k < kNumKeys; ++k) {
         if (!r.keyHeard[k]) continue;
         const double d = r.widthDb[k] - r.widthDb[0];
-        if (d < -1.5 && (k == 3 || r.keySeconds[k] > 10)) {
+        if (d < -1.5 && (keyName(k).find("chorus") != std::string::npos || r.keySeconds[k] > 10)) {
             Move m; m.key = k; m.param = sWidth; m.kind = mkWidth; m.module = "STEREO";
             m.full = float(clamp(-d * 5.0, 5.0, 15.0));
             m.extraParam = stIn; m.extraValue = 1;
             const float base = sectionVals ? sectionVals[k][sWidth] : song[sWidth];
             m.what = "IN, WIDTH  " + std::to_string(int(std::lround(base + m.full))) + "%";
-            m.why = std::string("The ") + keyName(k) + "s sit narrower than the rest. They can open up a little.";
+            m.why = "The " + many(k) + " sit narrower than the rest. They can open up a little.";
             m.conf = confFor(d, 1.5, mkWidth) - 10;
             add(m);
         }
@@ -344,6 +404,43 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
             m.what = "TARGET  " + fmt1(t) + " LUFS";
             m.why = t < destinationLufs(int(song[aDest])) ? "Any louder and the drums start to smear." : "As loud as the destination wants, short of the knee.";
             m.conf = 88;
+            add(m);
+        }
+    }
+
+    // SECTION LIFT: the limiter works hardest on the loudest section, so it evens the song out:
+    // a chorus that sat well over the verses in the mix comes out only a little over them. A quieter
+    // section's own TARGET, a little under the song's, gives some of that lift back.
+    {
+        r.contrast = contrastFrom(st);
+        const Contrast& c = r.contrast;
+        for (int k = 1; k < kNumKeys && c.loud > 0; ++k) {
+            if (!c.ok[k] || c.mixGap[k] < 0.5) continue;
+            const double lost = c.mixGap[k] - c.masterGap[k];
+            if (lost < 0.8) continue;
+            const double base = sectionVals ? sectionVals[k][lTarget] : song[lTarget];
+            const double give = std::round(clamp(0.7 * lost, 0.5, 3.0) * 10) / 10;
+            const double t = std::max(-16.0, std::round((base - give) * 10) / 10);
+            if (base - t < 0.3) continue;
+            Move m; m.key = k; m.param = lTarget; m.absolute = true; m.full = float(t); m.kind = mkLift; m.module = "LOUDNESS";
+            m.what = "TARGET  " + fmt1(t) + " LUFS";
+            m.why = "The " + many(c.loud) + " stand " + fmt1(c.mixGap[k]) + " dB over the " + many(k) + " in the mix, " + fmt1(std::max(0.0, c.masterGap[k])) +
+                    " after the limiter. This gives back " + fmt1(base - t) + ".";
+            m.conf = int(clamp(50 + 12 * (lost - 0.8), 45.0, 85.0) * (useTaste ? 0.75 + 0.5 * taste.lean(mkLift) : 1.0));
+            add(m);
+        }
+    }
+
+    // ...and the loudest section, which the limiter works hardest, needs less glue of its own to keep its punch.
+    if (r.contrast.loud > 0 && song[dynIn] > 0.5f) {
+        const int L = r.contrast.loud;
+        const SectionLevel lv = sectionLevel(st, L);
+        const float g0 = sectionVals ? sectionVals[L][dGlue] : song[dGlue];
+        if (lv.ok && lv.loss > 2.0 && g0 >= 2.5f) {
+            Move m; m.key = L; m.param = dGlue; m.kind = mkGlue; m.module = "DYNAMICS"; m.full = -1.5f;
+            m.what = "GLUE  " + fmt1(g0) + " \xe2\x86\x92 " + fmt1(g0 - 1.5f);
+            m.why = "The limiter already takes " + fmt1(lv.loss) + " dB off the " + many(L) + ". Less glue there keeps their punch.";
+            m.conf = int(clamp(45 + 8 * (lv.loss - 2.0), 45.0, 75.0));
             add(m);
         }
     }

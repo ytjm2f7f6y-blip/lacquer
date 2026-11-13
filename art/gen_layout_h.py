@@ -116,7 +116,8 @@ for r in L.READOUTS:
 pt, st = L.PRESET_TAPE, L.SECT_TAPE
 w(f"constexpr float kPresetTapeX = {f(pt['x'])}, kPresetTapeY = {f(pt['y'])}, kPresetTapeW = {f(pt['w'])}, kPresetTapeH = {f(pt['h'])}, kPresetTapeAngle = {f(pt['angle'])};")
 w(f"constexpr float kSectTapeX = {f(st['x'])}, kSectTapeY = {f(st['y'])}, kSectTapeW = {f(st['w'])}, kSectTapeH = {f(st['h'])}, kSectTapeAngle = {f(st['angle'])};")
-w("constexpr float kSectKeyX[5] = {" + ", ".join(f(L.control(f"sec_{i + 1}")["x"]) for i in range(5)) + "};")
+w(f"constexpr int kNumSections = {L.NUM_SECT};")
+w("constexpr float kSectKeyX[kNumSections] = {" + ", ".join(f(L.control(f"sec_{i + 1}")["x"]) for i in range(L.NUM_SECT)) + "};")
 la = L.SPACE_LATCH
 w(f"constexpr float kLatchX = {f(la['x'])}, kLatchY = {f(la['y'])}, kLatchR = {f(la['r'])};")
 w("")

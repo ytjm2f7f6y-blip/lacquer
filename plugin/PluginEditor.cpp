@@ -57,6 +57,19 @@ int indexOf(const char* id) {
     return -1;
 }
 bool is(const Control& c, const char* id) { return std::strcmp(c.id, id) == 0; }
+// sec_1 .. sec_8: the section key's number, else 0.
+int sectionKeyOf(const char* id) {
+    if (std::strncmp(id, "sec_", 4) != 0 || id[4] < '1' || id[4] > '9' || id[5] != 0) return 0;
+    const int k = id[4] - '0';
+    return k <= kNumSections ? k : 0;
+}
+// What fits on the strip of tape over a key.
+juce::String tapeLabel(const juce::String& name) {
+    static const char* const shortNames[][2] = {{"pre-chorus", "pre"}, {"post-chorus", "post"}, {"breakdown", "break"}, {"instrumental", "inst"},
+                                                {"interlude", "inter"}, {"middle 8", "mid 8"}, {"refrain", "refr"}};
+    for (const auto& sn : shortNames) if (name == sn[0]) return sn[1];
+    return name;
+}
 bool startsWith(const char* s, const char* p) { return std::strncmp(s, p, std::strlen(p)) == 0; }
 bool endsWith(const char* s, const char* e) { const size_t a = std::strlen(s), b = std::strlen(e); return a >= b && std::strcmp(s + a - b, e) == 0; }
 
@@ -154,8 +167,9 @@ bool LacquerEditor::lit(int ci) const {
     const auto& c = kControls[ci];
     for (int k = 0; k < 5; ++k) if (is(c, kScreenKeys[k])) return proc_.page == k;
     if (is(c, "sec_song")) return proc_.litKey() == 0;
-    if (startsWith(c.id, "sec_") && c.id[4] >= '1' && c.id[4] <= '5') return proc_.litKey() == c.id[4] - '0';
+    if (const int k = sectionKeyOf(c.id)) return proc_.litKey() == k;
     if (is(c, "sec_mark")) return proc_.marking();
+    if (is(c, "sec_follow")) return proc_.follow();
     if (is(c, "a_listen")) return proc_.listening();
     if (endsWith(c.id, "_idea"))
         for (int m = 0; m < 6; ++m) if (startsWith(c.id, kModules[m]) && c.id[std::strlen(kModules[m])] == '_') return proc_.ideaCount(m) > 0;
@@ -225,8 +239,14 @@ void LacquerEditor::click(int ci, const juce::MouseEvent& e) {
     const auto& c = kControls[ci];
     for (int k = 0; k < 5; ++k) if (is(c, kScreenKeys[k])) { proc_.page = k; moveScroll_ = 0; repaint(); return; }
     if (is(c, "sec_song")) { proc_.tapKey(0); repaint(); return; }
-    if (startsWith(c.id, "sec_") && c.id[4] >= '1' && c.id[4] <= '5') { proc_.tapKey(c.id[4] - '0'); repaint(); return; }
+    if (const int k = sectionKeyOf(c.id)) {
+        if (e.mods.isPopupMenu()) { showNameMenu(k); return; }   // right-click: what this key is called
+        proc_.tapKey(k);
+        repaint();
+        return;
+    }
     if (is(c, "sec_mark")) { proc_.setMarking(!proc_.marking()); proc_.page = 4; repaint(); return; }
+    if (is(c, "sec_follow")) { proc_.setFollow(!proc_.follow()); repaint(); return; }
     if (is(c, "a_listen")) { proc_.setListening(!proc_.listening()); repaint(); return; }
     if (is(c, "a_take")) { proc_.takeAll(); proc_.page = 2; repaint(); return; }
     if (is(c, "o_blind")) { proc_.setBlind(!proc_.blind()); repaint(); return; }
@@ -301,12 +321,12 @@ void LacquerEditor::stepPreset(int dir) {
 
 void LacquerEditor::renameSections() {
     auto* w = new juce::AlertWindow("Name the sections", "What each section key is called (on the tape and the SECTIONS screen):", juce::MessageBoxIconType::NoIcon);
-    for (int k = 1; k <= 5; ++k) w->addTextEditor("s" + juce::String(k), proc_.sectionName(k), juce::String(k));
+    for (int k = 1; k <= LacquerProcessor::kSections; ++k) w->addTextEditor("s" + juce::String(k), proc_.sectionName(k), juce::String(k));
     w->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
     w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
     w->enterModalState(true, juce::ModalCallbackFunction::create([this, w](int r) {
         if (r == 1)
-            for (int k = 1; k <= 5; ++k) proc_.setSectionName(k, w->getTextEditorContents("s" + juce::String(k)));
+            for (int k = 1; k <= LacquerProcessor::kSections; ++k) proc_.setSectionName(k, w->getTextEditorContents("s" + juce::String(k)));
         repaint();
     }), true);
 }
@@ -476,9 +496,13 @@ void LacquerEditor::drawLoudness(juce::Graphics& g) {
     const auto& r = proc_.result();
     auto XL = [](double v) { return float(8 + 364 * (v + 16) / 10); };
     auto YK = [](double k) { return float(52 + 140 * (1 - (k - 40) / 60)); };
-    double target = proc_.songValue(lq::lTarget);
+    // The lit key's target: the song's, or a section's own.
+    const int lk = proc_.litKey();
+    const bool own = proc_.shownIsOwn(lq::lTarget);
+    double target = proc_.shownValue(lq::lTarget);
     const bool guard = proc_.songValue(lq::lGuard) >= 0.5f && r.knee.known && target > r.knee.kneeLufs;
     if (guard) target = r.knee.kneeLufs;
+    const auto& map = proc_.songMap();
     g.setColour(kText.withAlpha(0.08f));
     if (r.knee.known) g.fillRect(juce::Rectangle<float>(ink.p(XL(r.knee.kneeLufs), 46), ink.p(372, 196)));
     auto vline = [&](float x) { juce::Path p; p.startNewSubPath(ink.p(x, 46)); p.lineTo(ink.p(x, 196)); ink.dashed(p, 3, 3, 1.0f, kText.withAlpha(0.6f)); };
@@ -496,6 +520,24 @@ void LacquerEditor::drawLoudness(juce::Graphics& g) {
         ink.glowLine(c);
         const int ti = juce::jlimit(0, 100, int(std::round((target + 16) * 10)));
         const auto np = ink.p(XL(target), YK(r.knee.kept[ti]));
+        // Sections with a target of their own: a numbered ring where each one sits on the curve
+        // (sections at the same target share a ring).
+        {
+            std::vector<std::pair<double, juce::String>> rings;
+            for (int k = 1; k < lq::kNumKeys; ++k) {
+                if (!map.has[k][lq::lTarget] || k == lk) continue;
+                const double tk = map.val[k][lq::lTarget];
+                bool merged = false;
+                for (auto& rg : rings) if (std::abs(rg.first - tk) < 0.25) { rg.second << " " << k; merged = true; }
+                if (!merged) rings.push_back({tk, juce::String(k)});
+            }
+            for (const auto& rg : rings) {
+                const int i = juce::jlimit(0, 100, int(std::round((rg.first + 16) * 10)));
+                const auto sp = ink.p(XL(rg.first), YK(r.knee.kept[i]));
+                g.setColour(kText.withAlpha(0.8f)); g.drawEllipse(sp.x - 5, sp.y - 5, 10, 10, 1.0f);
+                ink.text(rg.second, XL(rg.first), YK(r.knee.kept[i]) + 16, 10.0f, 1, 0.8f);
+            }
+        }
         g.setColour(kText.withAlpha(0.6f)); g.drawEllipse(np.x - 9, np.y - 9, 18, 18, 1.0f);
         g.setColour(kCurve); g.fillEllipse(np.x - 4.5f, np.y - 4.5f, 9, 9);
         const float ny = YK(r.knee.kept[ti]);
@@ -505,14 +547,31 @@ void LacquerEditor::drawLoudness(juce::Graphics& g) {
         const float kx = right ? XL(r.knee.kneeLufs) + 6 : XL(r.knee.kneeLufs) - 6;
         ink.text("DAMAGE STARTS", kx, 178, 10.5f, right ? 0 : 2);
         ink.text("at " + num1(r.knee.kneeLufs) + " LUFS", kx, 190, 10.5f, right ? 0 : 2, 0.74f);
-        l1 = "TARGET " + num1(target) + " LUFS   " + kDot.trim() + "   " + juce::String(juce::roundToInt(r.knee.kept[ti])) + "% OF TRANSIENTS KEPT";
-        if (proc_.litKey() != 0) l2 = "SET FOR THE WHOLE SONG: THE SAME IN EVERY SECTION";
+        l1 = (lk > 0 && own ? up(proc_.sectionName(lk)) + " " : juce::String()) + "TARGET " + num1(target) + " LUFS   " + kDot.trim() + "   " + juce::String(juce::roundToInt(r.knee.kept[ti])) + "% OF TRANSIENTS KEPT";
+        if (lk != 0 && own) {
+            const double d = target - proc_.songValue(lq::lTarget);
+            l2 = "THE " + up(proc_.sectionName(lk)) + "'S OWN TARGET: " + (std::abs(d) < 0.05 ? juce::String("THE SAME AS THE SONG")
+                                                                                         : juce::String(std::abs(d), 1) + " dB " + (d < 0 ? "UNDER" : "OVER") + " THE SONG");
+        } else if (lk != 0) l2 = "THE " + up(proc_.sectionName(lk)) + " FOLLOWS THE SONG'S TARGET: TURN IT TO GIVE IT ITS OWN";
         else if (guard) l2 = "GUARD STOPS THE LIMITER JUST BEFORE THE KNEE";
         else if (target > r.knee.kneeLufs) l2 = "PAST THE KNEE: THE DRUMS ARE STARTING TO SMEAR";
         else l2 = "SHORT OF THE KNEE: THE DRUMS KEEP THEIR SNAP";
     } else {
         l1 = "TARGET " + num1(target) + " LUFS";
         l2 = proc_.loudnessKnown() ? "PRESS LISTEN AND PLAY THE SONG ONCE TO FIND THE KNEE" : "LEARNING THE SONG'S LOUDNESS AS IT PLAYS";
+    }
+    // How far the loudest section stands over the others: the mix's own lift, and what's left of it.
+    {
+        const auto& c = r.contrast;
+        int other = -1;
+        for (int k = 1; k < lq::kNumKeys; ++k)
+            if (c.ok[k] && (other < 0 || c.seconds[k] > c.seconds[other])) other = k;
+        if (lk > 0 && lk != c.loud && c.ok[lk]) other = lk;
+        double mix = 0, master = 0;
+        if (other > 0 && proc_.sectionGap(other, mix, master)) {
+            ink.text(up(LacquerProcessor::plural(proc_.sectionName(c.loud))) + " OVER " + up(LacquerProcessor::plural(proc_.sectionName(other))), 14, 116, 10.5f, 0, 0.9f);
+            ink.text("in the mix " + num1(mix, true) + " dB, mastered about " + num1(master, true) + " dB", 14, 129, 10.5f, 0, 0.74f);
+        }
     }
     for (int v : {-16, -14, -12, -10, -8, -6}) {
         const juce::String s = (v < 0 ? kMinus : "") + juce::String(std::abs(v)) + (v == -6 ? " LUFS" : "");
@@ -632,45 +691,99 @@ int LacquerEditor::blockAt(juce::Point<float> pt, bool& nearEdge) const {
     return -1;
 }
 
+// The soft keys under the timeline, in screen coordinates: what the picked block is, and what to do with it.
+namespace {
+struct SoftKey { int id; float x0, x1; };
+enum { skPrev, skType, skNext, skSplit, skJoin, skAdd, kNumSoftKeys };
+constexpr SoftKey kSoftKeys[kNumSoftKeys] = {{skPrev, 12, 26}, {skType, 28, 138}, {skNext, 140, 154},
+                                             {skSplit, 164, 206}, {skJoin, 212, 250}, {skAdd, 260, 368}};
+constexpr float kSoftY0 = 89, kSoftY1 = 104;
+}  // namespace
+
+int LacquerEditor::softKeyAt(juce::Point<float> pt) const {
+    const auto o = sc(0, 0);
+    const float x = pt.x - o.x, y = pt.y - o.y;
+    if (y < kSoftY0 - 2 || y > kSoftY1 + 2) return -1;
+    for (const auto& k : kSoftKeys) if (x >= k.x0 - 1 && x <= k.x1 + 1) return k.id;
+    return -1;
+}
+
 void LacquerEditor::drawSections(juce::Graphics& g) {
     const Ink ink{g, art_->legend, kFaceX - 2, kFaceY - 2};
     const auto& m = proc_.songMap();
     const int lk = proc_.litKey();
     const double q = proc_.barLength();
+    if (selMark_ >= m.count) selMark_ = m.count - 1;
     for (int i = 0; i < m.count; ++i) {
         const float x0 = xOfPpq(m.marks[i].ppq) - (kFaceX - 2), x1 = (i + 1 < m.count ? xOfPpq(m.marks[i + 1].ppq) - (kFaceX - 2) : 372.0f);
         const bool on = lk > 0 && m.marks[i].key == lk;
         const auto r = juce::Rectangle<float>(ink.p(x0 + 1, 50), ink.p(std::max(x0 + 3, x1 - 1), 74));
         g.setColour(kText.withAlpha(on ? 0.88f : 0.10f)); g.fillRoundedRectangle(r, 2.0f);
         g.setColour(kText.withAlpha(on ? 1.0f : 0.55f)); g.drawRoundedRectangle(r, 2.0f, 0.8f);
+        if (i == selMark_) {   // the picked block: a bright frame, and a handle on the edge that moves it
+            g.setColour(kCurve); g.drawRoundedRectangle(r.expanded(1.5f), 3.0f, 1.6f);
+            g.fillRect(juce::Rectangle<float>(r.getX() - 1.5f, r.getY() + 5, 3.0f, r.getHeight() - 10));
+        }
         if (x1 - x0 > 9) ink.text(m.marks[i].key == 0 ? juce::String("S") : juce::String(m.marks[i].key), (x0 + x1) / 2, 66.5f, 12.0f, 1, 1.0f, on ? kInk : kText);
     }
     if (m.count > 0 && m.marks[0].ppq > 0.01) {   // before the first mark: the song settings
         const float x1 = xOfPpq(m.marks[0].ppq) - (kFaceX - 2);
         g.setColour(kText.withAlpha(0.05f)); g.fillRect(juce::Rectangle<float>(ink.p(8, 50), ink.p(x1 - 1, 74)));
     }
-    if (proc_.playing()) {
+    {   // the playhead, playing or not
         const float x = xOfPpq(proc_.playheadPpq());
-        g.setColour(kCurve); g.fillRect(x - 0.6f, ink.p(0, 46).y, 1.2f, 32.0f);
+        g.setColour(kCurve.withAlpha(proc_.playing() ? 1.0f : 0.55f)); g.fillRect(x - 0.6f, ink.p(0, 46).y, 1.2f, 32.0f);
     }
     // Bar numbers under the blocks.
     const double end = proc_.songEndPpq(), bars = end / q;
     const int step = bars > 120 ? 32 : (bars > 60 ? 16 : 8);
     for (int b = 0; b * q < end; b += step) ink.text(juce::String(b + 1), xOfPpq(b * q) - (kFaceX - 2), 84, 9.5f, b == 0 ? 0 : 1, 0.5f);
-    juce::String legend;
-    for (int k = 1; k <= 5; ++k) legend << k << " " << up(proc_.sectionName(k)) << "     ";
-    ink.text(legend.trim(), 14, 97, 10.5f, 0, 0.74f);
+
+    // The soft keys.
+    const bool picked = selMark_ >= 0 && selMark_ < m.count;
+    const int pk = picked ? m.marks[selMark_].key : -1;
+    bool canSplit = false;
+    if (picked) canSplit = proc_.blockEnd(selMark_) - m.marks[selMark_].ppq > q * 1.5;
+    for (const auto& k : kSoftKeys) {
+        const bool enabled = k.id == skAdd || (picked && (k.id != skSplit || canSplit));
+        const float a = enabled ? 1.0f : 0.3f;
+        const auto r = juce::Rectangle<float>(ink.p(k.x0, kSoftY0), ink.p(k.x1, kSoftY1));
+        g.setColour(kText.withAlpha((softDown_ == k.id ? 0.35f : 0.07f) * a)); g.fillRoundedRectangle(r, 2.0f);
+        g.setColour(kText.withAlpha(0.6f * a)); g.drawRoundedRectangle(r, 2.0f, 0.8f);
+        const float cxk = (k.x0 + k.x1) / 2, mid = (kSoftY0 + kSoftY1) / 2;
+        if (k.id == skPrev || k.id == skNext) {
+            juce::Path t;
+            const float d = k.id == skPrev ? -1.0f : 1.0f;
+            t.addTriangle(ink.p(cxk + 3.5f * d, mid), ink.p(cxk - 2.5f * d, mid - 4), ink.p(cxk - 2.5f * d, mid + 4));
+            g.setColour(kText.withAlpha(a)); g.fillPath(t);
+            continue;
+        }
+        juce::String label;
+        switch (k.id) {
+            case skType: label = !picked ? juce::String("PICK A BLOCK") : (pk == 0 ? juce::String("SONG SETTINGS") : juce::String(pk) + " " + up(proc_.sectionName(pk))); break;
+            case skSplit: label = "SPLIT"; break;
+            case skJoin: label = "JOIN"; break;
+            case skAdd: label = proc_.marking() ? "+ AT PLAYHEAD" : "+ MARK AT PLAYHEAD"; break;
+            default: break;
+        }
+        while (label.length() > 3 && ink.width(label, 10.5f) > k.x1 - k.x0 - 6) label = label.dropLastCharacters(1);
+        ink.text(label, cxk, mid + 4, 10.5f, 1, a);
+    }
+
     // What the lit key changes.
     const lq::Values song = proc_.songValues();
     juce::String title, foot;
     std::vector<std::pair<juce::String, juce::String>> rows;
     if (lk == 0) {
         title = "EVERY SECTION STARTS FROM THE SONG SETTINGS";
-        for (int k = 1; k <= 5; ++k) {
+        for (int k = 1; k <= LacquerProcessor::kSections; ++k) {
+            bool used = false;
+            for (int i = 0; i < m.count; ++i) used = used || m.marks[i].key == k;
             const int c = m.changes(k);
+            if (!used && !c) continue;
             rows.push_back({juce::String(k) + "  " + up(proc_.sectionName(k)), c ? "changes " + juce::String(c) + (c > 1 ? " things" : " thing") : juce::String("follows the song")});
         }
-        foot = "Loudness and the output are set once, for the whole song.";
+        foot = "Ceiling, clipper and the output are set once, for the whole song.";
     } else {
         title = "WHAT THE " + up(proc_.sectionName(lk)) + " CHANGES";
         // One row per module, its changes joined.
@@ -690,21 +803,73 @@ void LacquerEditor::drawSections(juce::Graphics& g) {
         if (rows.empty()) rows.push_back({"", "Nothing. It follows the song."});
         foot = "Everything else follows the song. Changes glide in over a beat.";
     }
-    if (proc_.marking()) foot = "Tap a number as each section starts. Press MARK again to finish.";
-    ink.text(title, 14, 113, 10.5f, 0, 1.0f, kText, 0.04f);
-    for (size_t i = 0; i < rows.size() && i < 5; ++i) {
-        const float y = 128.0f + float(i) * 14.5f;
+    if (proc_.marking()) foot = proc_.playing() ? "Tap a number as each section starts. Press MARK again to finish."
+                                                : "Put the playhead on a bar and tap a number to mark it there.";
+    ink.text(title, 14, 120, 10.5f, 0, 1.0f, kText, 0.04f);
+    for (size_t i = 0; i < rows.size() && i < 4; ++i) {
+        const float y = 135.0f + float(i) * 14.5f;
         ink.text(rows[i].first, 14, y, 11.5f, 0, 1.0f, kText, 0.05f);
         juce::String what = rows[i].second;
         while (what.length() > 4 && ink.width(what, 11.0f, 0.02f) > 262) what = what.dropLastCharacters(4) + "...";
         ink.text(what, 104, y, 11.0f, 0, 0.78f, kText, 0.02f);
     }
+    if (rows.size() > 4) ink.text("and " + juce::String(int(rows.size()) - 4) + " more", 366, 120, 10.0f, 2, 0.6f);
     ink.text(foot, 14, 201, 10.5f, 0, 0.74f);
     juce::String l1 = "SECTIONS   EDITING " + (lk == 0 ? juce::String("THE WHOLE SONG") : juce::String(lk) + " " + up(proc_.sectionName(lk)));
-    juce::String l2 = juce::String(m.count) + (m.count == 1 ? " SECTION" : " SECTIONS") + " MARKED   " + kDot.trim() + "   LOUDNESS STAYS THE SAME";
+    if (proc_.playing() && !proc_.follow() && m.count > 0) l1 << "   " << kDot.trim() << "   HELD";
+    juce::String l2 = juce::String(m.count) + (m.count == 1 ? " SECTION" : " SECTIONS") + " MARKED   " + kDot.trim() + "   CLICK A BLOCK TO PICK IT";
     if (m.count == 0) l2 = "PRESS MARK, PLAY THE SONG, TAP A NUMBER AS EACH PART STARTS";
     if (proc_.marking()) { l1 = "SECTIONS   MARKING"; l2 = proc_.playing() ? "TAP A NUMBER AS EACH SECTION STARTS" : "PLAY THE SONG AND TAP A NUMBER AS EACH SECTION STARTS"; }
     header(g, l1, l2);
+}
+
+void LacquerEditor::showKeyMenu(int markIndex) {
+    juce::PopupMenu menu;
+    const auto& m = proc_.songMap();
+    const int cur = markIndex >= 0 && markIndex < m.count ? m.marks[markIndex].key : -1;
+    for (int k = 0; k < lq::kNumKeys; ++k)
+        menu.addItem((k == 0 ? juce::String("song settings") : juce::String(k) + "  " + proc_.sectionName(k)), true, k == cur, [this, markIndex, k] {
+            proc_.setMarkKey(markIndex, k);
+            proc_.setEditKey(k);
+            repaint();
+        });
+    if (cur > 0) {
+        menu.addSeparator();
+        juce::PopupMenu names;
+        addNameItems(names, cur);
+        menu.addSubMenu("Key " + juce::String(cur) + " is called...", names);
+    }
+    menu.addSeparator();
+    menu.addItem("Split this block", proc_.blockEnd(markIndex) - (cur >= 0 ? m.marks[markIndex].ppq : 0) > proc_.barLength() * 1.5, false,
+                 [this, markIndex] { selMark_ = proc_.splitMark(markIndex); repaint(); });
+    menu.addItem("Join it to the one before", [this, markIndex] { proc_.joinMark(markIndex); selMark_ = markIndex - 1; repaint(); });
+    menu.addItem("Remove every mark", [this] { proc_.editSongMap([](lq::SongMap& mm) { mm.count = 0; }); selMark_ = -1; proc_.setEditKey(0); repaint(); });
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withMousePosition());
+}
+
+// The names a section key can have: the usual ones, and your own.
+void LacquerEditor::addNameItems(juce::PopupMenu& menu, int key) {
+    const auto names = LacquerProcessor::sectionVocabulary();
+    for (const auto& n : names) menu.addItem(n, true, proc_.sectionName(key) == n, [this, key, n] { proc_.setSectionName(key, n); repaint(); });
+    menu.addSeparator();
+    menu.addItem("Write your own...", [this, key] {
+        auto* w = new juce::AlertWindow("Section key " + juce::String(key), "What to call it:", juce::MessageBoxIconType::NoIcon);
+        w->addTextEditor("name", proc_.sectionName(key));
+        w->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        w->enterModalState(true, juce::ModalCallbackFunction::create([this, w, key](int r) {
+            if (r == 1) proc_.setSectionName(key, w->getTextEditorContents("name"));
+            repaint();
+        }), true);
+    });
+}
+
+void LacquerEditor::showNameMenu(int key) {
+    if (key < 1 || key > LacquerProcessor::kSections) return;
+    juce::PopupMenu menu;
+    menu.addSectionHeader("Section key " + juce::String(key));
+    addNameItems(menu, key);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withMousePosition());
 }
 
 void LacquerEditor::screenClick(juce::Point<float> pt, const juce::MouseEvent& e) {
@@ -716,19 +881,43 @@ void LacquerEditor::screenClick(juce::Point<float> pt, const juce::MouseEvent& e
         if (pt.y < o.y + 28 && juce::roundToInt(proc_.songValue(lq::aTarget)) == 0)   // the target's name: another style
             proc_.setGenre(proc_.genre() + (e.mods.isShiftDown() || e.mods.isPopupMenu() ? -1 : 1));
     } else if (proc_.page == 4) {
+        const auto& m = proc_.songMap();
+        const int sk = softKeyAt(pt);
+        if (sk >= 0) {
+            const bool picked = selMark_ >= 0 && selMark_ < m.count;
+            softDown_ = sk;
+            switch (sk) {
+                case skPrev:
+                case skNext:
+                    if (picked) {
+                        const int k = (m.marks[selMark_].key + (sk == skNext ? 1 : lq::kNumKeys - 1)) % lq::kNumKeys;
+                        proc_.setMarkKey(selMark_, k);
+                        proc_.setEditKey(k);
+                    }
+                    break;
+                case skType: if (picked) showKeyMenu(selMark_); break;
+                case skSplit: if (picked) { const int n = proc_.splitMark(selMark_); if (n >= 0) selMark_ = n; } break;
+                case skJoin: if (picked) { proc_.joinMark(selMark_); selMark_ = std::min(selMark_ - 1, proc_.songMap().count - 1); } break;
+                case skAdd: {
+                    const int lkey = proc_.litKey();
+                    selMark_ = proc_.addMarkAtPlayhead(lkey > 0 ? lkey : 1);
+                    if (lkey <= 0) proc_.setEditKey(1);
+                    break;
+                }
+                default: break;
+            }
+            repaint();
+            return;
+        }
         bool edge = false;
         const int b = blockAt(pt, edge);
         if (b < 0) return;
-        if (e.mods.isPopupMenu()) {
-            juce::PopupMenu m;
-            for (int k = 0; k <= 5; ++k) m.addItem(k == 0 ? juce::String("song settings") : juce::String(k) + "  " + proc_.sectionName(k), [this, b, k] { proc_.setMarkKey(b, k); repaint(); });
-            m.addSeparator();
-            m.addItem("Remove this mark", [this, b] { proc_.removeMark(b); repaint(); });
-            m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withMousePosition());
-            return;
-        }
-        if (edge) { drag_ = kScreen; dragMark_ = b; return; }
-        proc_.setEditKey(proc_.songMap().marks[b].key);
+        selMark_ = b;
+        if (e.mods.isPopupMenu()) { repaint(); showKeyMenu(b); return; }
+        if (edge) { drag_ = kScreen; dragMark_ = b; repaint(); return; }
+        // Picking a block lights its key; while the song plays, that also stops FOLLOW.
+        proc_.setEditKey(m.marks[b].key);
+        if (proc_.playing()) proc_.setFollow(false);
     }
     repaint();
 }
@@ -917,10 +1106,10 @@ void LacquerEditor::drawTapes(juce::Graphics& g) {
         g.setColour(juce::Colour(0x1a141a2a));
         g.drawText(text, r.translated(0.5f * s_, 0.6f * s_), juce::Justification::centred, false);
         g.setColour(juce::Colour(0xe0181a26));
-        g.drawFittedText(text, r.toNearestInt(), juce::Justification::centred, 1, 0.8f);
+        g.drawFittedText(text, r.toNearestInt(), juce::Justification::centred, 1, 0.62f);
     };
     write(kPresetTapeX, kPresetTapeY, kPresetTapeAngle, kPresetTapeW - 30, kPresetTapeH, proc_.presetName);
-    for (int k = 0; k < 5; ++k) write(kSectKeyX[k], kSectTapeY + 0.5f, kSectTapeAngle, 48, kSectTapeH + 4, proc_.sectionName(k + 1));
+    for (int k = 0; k < kNumSections; ++k) write(kSectKeyX[k], kSectTapeY + 0.5f, kSectTapeAngle, 34, kSectTapeH + 2, tapeLabel(proc_.sectionName(k + 1)));
 }
 
 // The strip under the faceplate: what the control under the pointer does, in plain words.
@@ -933,13 +1122,13 @@ void LacquerEditor::drawHelp(juce::Graphics& g) {
                         "The SECTIONS keys edit one part of the song. The quarter-turn latch at the bottom left lets out the hidden SPACE tray.";
     juce::String id = hoverId_;
     const int ci = indexOf(id.toRawUTF8());
-    if (id.startsWith("sec_") && id.length() == 5 && id[4] >= '1' && id[4] <= '5') {
-        const int k = id[4] - '0';
-        name = "section " + juce::String(k) + kDot + proc_.sectionName(k);
-        range = "section key";
-        text = "Edit the " + proc_.sectionName(k) + " on its own: knobs you turn while this key is lit change only the " + proc_.sectionName(k) +
-               ", and the rest follow the song. While the song plays, the key for the section you're in lights by itself and the knobs move to its settings. "
-               "With MARK lit, tapping it while the song plays marks where a " + proc_.sectionName(k) + " starts.";
+    if (const int k = sectionKeyOf(id.toRawUTF8())) {
+        const auto nm = proc_.sectionName(k);
+        name = "section " + juce::String(k) + kDot + nm;
+        range = "section key. click it; right-click to rename.";
+        text = "Edit the " + nm + " on its own: knobs you turn while this key is lit change only the " + nm +
+               ", and the rest follow the song. With FOLLOW lit the key for the section you're in lights by itself as the song plays; pressing it while the song plays holds it. "
+               "With MARK lit, tapping it marks where a " + nm + " starts.";
     } else {
         if (id.endsWith("_idea")) id = "idea";
         else if (id.endsWith("_in") && id != "sp_in") id = "in_";
@@ -1034,7 +1223,12 @@ void LacquerEditor::mouseMove(const juce::MouseEvent& e) {
     else if (proc_.trayOpen && pt.y > H && pt.x < 150 && pt.y < H + 90) id = "tray_plate";
     if (id != hoverId_) { hoverId_ = id; repaintPts({0, H + trayH(), W, kHelpH}); }
     bool pointing = h == kLatch || h == kPresetTape || h == kSectTape || (h >= 0 && h < kNumControls && kControls[h].type == Button);
-    if (h == kScreen) pointing = (proc_.page == 2 && moveRowAt(pt) >= 0) || proc_.page == 4 || (proc_.page == 0 && pt.y < sc(0, 28).y);
+    if (h == kScreen) {
+        bool edge = false;
+        const bool onBlock = proc_.page == 4 && blockAt(pt, edge) >= 0;
+        if (onBlock && edge) { setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); return; }
+        pointing = (proc_.page == 2 && moveRowAt(pt) >= 0) || onBlock || (proc_.page == 4 && softKeyAt(pt) >= 0) || (proc_.page == 0 && pt.y < sc(0, 28).y);
+    }
     setMouseCursor(pointing ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
 }
 
@@ -1049,7 +1243,12 @@ void LacquerEditor::mouseDown(const juce::MouseEvent& e) {
     if (h == kScreen) { screenClick(pt, e); return; }
     if (h == kLatch) { setTray(!proc_.trayOpen); return; }
     if (h == kPresetTape) { showPresetMenu(); return; }
-    if (h == kSectTape) { renameSections(); return; }
+    if (h == kSectTape) {
+        int best = 0;
+        for (int k = 1; k < kNumSections; ++k) if (std::abs(pt.x - kSectKeyX[k]) < std::abs(pt.x - kSectKeyX[best])) best = k;
+        showNameMenu(best + 1);
+        return;
+    }
     if (h == kReadLufs) { proc_.resetIntegrated(); return; }
     if (h < 0 || h >= kNumControls) return;
     const auto& c = kControls[h];
@@ -1093,6 +1292,7 @@ void LacquerEditor::mouseUp(const juce::MouseEvent&) {
     if (drag_ >= 0 && drag_ < kNumControls) endEdit(dragParam_);
     drag_ = kNone; dragMark_ = -1; dragParam_ = -1;
     if (pressed_ >= 0) { const int was = pressed_; pressed_ = kNone; repaintPts(boundsOf(was)); }
+    if (softDown_ >= 0) { softDown_ = -1; repaintPts({kFaceX, kFaceY, kFaceW, kFaceH}); }
 }
 
 void LacquerEditor::mouseDoubleClick(const juce::MouseEvent& e) {

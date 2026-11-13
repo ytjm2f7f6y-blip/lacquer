@@ -60,7 +60,7 @@ public:
     void setSong(int p, float value);                 // in the parameter's own units, host told
 
     // ---- the lit key and what the knobs show
-    int litKey() const;                               // 0 the song, 1..5 a section
+    int litKey() const;                               // 0 the song, 1..8 a section
     void setEditKey(int key);
     int editKey() const { return engine_.editKey_.load(); }
     float shownValue(int p) const;                    // the lit key's value
@@ -74,14 +74,23 @@ public:
     void editSongMap(const std::function<void(lq::SongMap&)>& f) { engine_.song().edit(f); }
     bool marking() const { return marking_; }
     void setMarking(bool on);
-    void tapKey(int key);                             // a section key pressed: mark (while marking and playing) or edit
+    void tapKey(int key);                             // a section key pressed: mark (while marking) or edit
+    bool follow() const { return follow_.load(); }    // while playing, the lit key follows the song
+    void setFollow(bool on);
     void moveMark(int index, double ppq);
     void removeMark(int index);
     void setMarkKey(int index, int key);
+    int addMarkAtPlayhead(int key);                   // the bar the playhead is in; returns the new mark's index
+    int splitMark(int index);                         // halves a block (on a bar line); returns the second half's index
+    void joinMark(int index);                         // folds a block into the one before it
+    double blockEnd(int index) const;                 // where a marked block ends
     double barLength() const { return quartersPerBar_.load(); }   // in quarter notes
     double songEndPpq() const;                        // how far the SECTIONS screen reaches
-    juce::String sectionName(int key) const { return key <= 0 ? "song" : sectionNames_[size_t(key - 1)]; }
+    juce::String sectionName(int key) const { return key <= 0 ? "song" : sectionNames_[size_t(juce::jlimit(1, kSections, key) - 1)]; }
     void setSectionName(int key, const juce::String& n);
+    static constexpr int kSections = lq::kNumKeys - 1;
+    static juce::StringArray sectionVocabulary();     // names offered for a section key
+    static juce::String plural(const juce::String& name) { return juce::String(lq::plural(name.toStdString())); }
 
     // ---- the transport, as the audio thread last saw it
     bool playing() const { return playing_.load(); }
@@ -106,6 +115,10 @@ public:
     void takeAll();
     void applyAmount();                               // AMOUNT moved: rescale the taken moves
     int ideaCount(int module) const;                  // taken moves working in a module (0 clean .. 5 loudness)
+    // How far the loudest section stands over section k: in the mix, and (about) after the limiter
+    // with the targets as they are now. False if the pass didn't hear both.
+    bool sectionGap(int k, double& mix, double& master) const;
+    double driveFor(int key) const;                   // the drive a key plays with now (dB)
     juce::String lastNote;                            // a one-line note for the screen (blind result etc.)
 
     // ---- A / B and blind
@@ -186,8 +199,9 @@ private:
 
     // sections
     bool marking_ = false;
+    std::atomic<bool> follow_{true};
     double lastTapPpq_ = -1e9;
-    std::array<juce::String, 5> sectionNames_{{"intro", "verse", "chorus", "bridge", "outro"}};
+    std::array<juce::String, kSections> sectionNames_;
 
     // A / B
     int ab_ = 0;

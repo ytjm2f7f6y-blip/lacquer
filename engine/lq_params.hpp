@@ -98,7 +98,7 @@ inline const ParamDef* paramTable() {
         {spB, "sp_b", "space b", kLin, 0, 10, 6, 0, nullptr, "", true, gLin},
 
         {loudIn, "loud_in", "loudness in", kBool, 0, 1, 1, 0, nullptr, "", false, gBlend},
-        {lTarget, "l_target", "target", kLin, -16, -6, -9.4f, 0, nullptr, "LUFS", false, gLin},
+        {lTarget, "l_target", "target", kLin, -16, -6, -9.4f, 0, nullptr, "LUFS", true, gLin},
         {lCeiling, "l_ceiling", "ceiling", kLin, -2, 0, -1, 0, nullptr, "dBTP", false, gLin},
         {lClip, "l_clip", "clipper", kLin, 0, 10, 3, 0, nullptr, "", false, gLin},
         {lGuard, "l_guard", "guard", kBool, 0, 1, 1, 0, nullptr, "", false, gStep},
@@ -151,7 +151,7 @@ inline int findParam(const char* id) {
 }
 
 // The section keys: 0 = the song, 1..5 = the five sections.
-constexpr int kNumKeys = 6;
+constexpr int kNumKeys = 9;   // the song and eight section keys
 
 // Values of every parameter, in their own units.
 struct Values {

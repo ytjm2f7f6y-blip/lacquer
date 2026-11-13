@@ -42,6 +42,7 @@ public:
     // For the snapshot tool: run the meters on as if `frames` frames had passed, and show the help for an id.
     void tick(int frames = 1);
     void showHelp(const char* id) { hoverId_ = id; }
+    void pickBlock(int i) { selMark_ = i; }
 
     static constexpr float kHelpH = 80.0f;
 
@@ -82,6 +83,10 @@ private:
     void screenClick(juce::Point<float> pt, const juce::MouseEvent&);
     int moveRowAt(juce::Point<float> pt) const;
     int blockAt(juce::Point<float> pt, bool& nearEdge) const;
+    int softKeyAt(juce::Point<float> pt) const;
+    void showKeyMenu(int markIndex);
+    void showNameMenu(int key);
+    void addNameItems(juce::PopupMenu& menu, int key);
     float xOfPpq(double ppq) const;
     double ppqAtX(float x) const;
     juce::String keyLabel(int key) const;
@@ -115,6 +120,7 @@ private:
     float dragStartNorm_ = 0, dragAccum_ = 0;
     juce::Point<float> dragLast_;
     bool dragMoved_ = false, dropHover_ = false;
+    int selMark_ = -1, softDown_ = -1;   // the SECTIONS screen: the picked block, the soft key held down
     juce::String hoverId_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LacquerEditor)

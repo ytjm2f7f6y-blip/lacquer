@@ -317,8 +317,10 @@ private:
         // LOUDNESS: the drive is the target less what the limiter's input measured. It is fixed while
         // the song plays (so the song's own ups and downs are kept) and moves only when it stops.
         limInK_.push(L, R, n);
-        if (t.playing) feedPass(passIn_, L, R, n, limInBlock_);
-        double target = song[lTarget];
+        if (t.playing) feedPass(passIn_, L, R, n, limInBlock_, listening_ ? an_.stats().limIn : nullptr);
+        // The section's own target, if it has one (gliding in with the rest of its settings): a
+        // section driven less than the song plays quieter and keeps more of its peaks.
+        double target = v[lTarget];
         bool guarding = false;
         if (song[lGuard] > 0.5f && kneeKnown_ && target > knee_) { target = knee_; guarding = true; }
         double drive = 0;
@@ -349,7 +351,7 @@ private:
 
         // Meters, on what leaves for the bounce.
         outK_.push(L, R, n);
-        if (t.playing) feedPass(passOut_, L, R, n, outBlock_);
+        if (t.playing) feedPass(passOut_, L, R, n, outBlock_, listening_ ? an_.stats().out : nullptr);
         double tpk = 0;
         for (int i = 0; i < n; ++i) {
             const double a = std::max(tp_[0].process(L[i]), tp_[1].process(R[i]));
@@ -377,7 +379,7 @@ private:
 
     // 400 ms K-weighted blocks with 75 % overlap, for the integrated loudness of a pass.
     struct BlockAcc { lp::Biquad pre[2], rlb[2]; double sub = 0, q[4]{}; int n = 0, qi = 0; bool init = false; };
-    void feedPass(KeyStats& ks, const float* L, const float* R, int n, BlockAcc& b) {
+    void feedPass(KeyStats& ks, const float* L, const float* R, int n, BlockAcc& b, KeyStats* perKey = nullptr) {
         if (!b.init) {
             KLevel k; k.prepare(fs_);
             for (int c = 0; c < 2; ++c) { b.pre[c] = k.pre[c]; b.rlb[c] = k.rlb[c]; }
@@ -391,9 +393,16 @@ private:
                 b.q[b.qi & 3] = b.sub / len;
                 if (++b.qi >= 4) {
                     const double ms = 0.25 * (b.q[0] + b.q[1] + b.q[2] + b.q[3]);
-                    ks.blocks.push_back(-0.691 + 10 * std::log10(ms + 1e-20));
+                    const double lu = -0.691 + 10 * std::log10(ms + 1e-20);
+                    ks.blocks.push_back(lu);
                     ks.aux.push_back(driveNow_);
                     ks.seconds += 0.1;
+                    if (perKey) {   // the listening pass: the song, and the section it's in
+                        for (KeyStats* k : {&perKey[0], curKey_ > 0 ? &perKey[curKey_] : nullptr}) {
+                            if (!k) continue;
+                            k->blocks.push_back(lu); k->aux.push_back(driveNow_); k->seconds += 0.1;
+                        }
+                    }
                 }
                 b.sub = 0; b.n = 0;
             }

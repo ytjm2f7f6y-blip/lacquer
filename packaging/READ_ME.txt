@@ -28,13 +28,22 @@ The assistant:
   remember this master's balance).
 
 Sections:
-  Press MARK, play the song, and tap 1 to 5 as each part starts.
-  Press MARK again to finish. With the song stopped, press a number:
-  knobs you turn now change only that section. SONG goes back to the
-  whole song. Double-click a knob to make the section follow the song
-  again. On the SECTIONS screen, drag a block's left edge to move a
-  mark; right-click a block to change or remove it. Click the tape
-  over the number keys to name the sections.
+  Press MARK, play the song, and tap 1 to 8 as each part starts (or,
+  stopped, put the playhead on a bar and tap). Press MARK again to
+  finish. Right-click a number key, or click its name on the tape,
+  to change what it's called (pre-chorus, drop, middle 8, solo...).
+  Press a number: knobs you turn now change only that section. SONG
+  goes back to the whole song. Double-click a knob to make the
+  section follow the song again.
+  FOLLOW (lit): while the song plays, the lit key follows the section
+  you're in. Press a key while it plays to hold that section; press
+  FOLLOW to pick the song back up.
+  Loudness per section: with a section lit, TARGET is that section's
+  own. A verse a dB or two under the song lets the chorus lift.
+  The assistant suggests this when the limiter flattens the song.
+  On the SECTIONS screen: click a block to pick it. The arrows change
+  what it is, SPLIT halves it, JOIN folds it into the one before,
+  + MARK AT PLAYHEAD adds one. Drag a block's left edge to move it.
 
 The SPACE tray: give the latch at the bottom left a quarter turn.
 

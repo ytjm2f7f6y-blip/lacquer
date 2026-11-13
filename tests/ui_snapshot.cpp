@@ -59,8 +59,9 @@ juce::MemoryBlock listenedSession() {
     play(p, head, nullptr, 0, 1000, true, [&](int bar) {
         if (bar == 0) p.tapKey(1);
         if (bar == 4 || bar == 20) p.tapKey(2);
-        if (bar == 12 || bar == 28) p.tapKey(3);
-        if (bar == 36) p.tapKey(5);
+        if (bar == 10 || bar == 26) p.tapKey(3);
+        if (bar == 12 || bar == 28) p.tapKey(4);
+        if (bar == 36) p.tapKey(8);
     });
     p.setMarking(false);
     p.idle();
@@ -71,7 +72,7 @@ juce::MemoryBlock listenedSession() {
 }
 
 void shot(const juce::String& file, const juce::MemoryBlock* session, const std::function<void(LacquerProcessor&)>& setup, float scale = 1.0f,
-          const char* help = nullptr, bool tray = false) {
+          const char* help = nullptr, bool tray = false, int pick = -1) {
     LacquerProcessor proc;
     Head head;
     proc.setPlayHead(&head);
@@ -85,6 +86,7 @@ void shot(const juce::String& file, const juce::MemoryBlock* session, const std:
     auto* le = dynamic_cast<LacquerEditor*>(ed.get());
     play(proc, head, le, 26, 5.0, false);   // a chorus, transport stopped: the meters move, the keys stay put
     if (help) le->showHelp(help);
+    if (pick >= 0) le->pickBlock(pick);
     auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 2.0f);
     juce::File f(file);
     f.deleteFile();
@@ -100,7 +102,12 @@ int main(int argc, char** argv) {
     const juce::String dir = argc > 1 ? argv[1] : ".";
     const auto session = listenedSession();
     shot(dir + "/ui_balance.png", &session, [](LacquerProcessor& p) { p.page = 0; }, 1.0f, "crt_bal");
-    shot(dir + "/ui_loudness.png", &session, [](LacquerProcessor& p) { p.page = 1; }, 1.0f, "l_target");
+    shot(dir + "/ui_loudness.png", &session, [](LacquerProcessor& p) {
+        p.page = 1;
+        for (int i = 0; i < int(p.result().moves.size()); ++i)
+            if (p.result().moves[size_t(i)].kind == mkLift) p.takeMove(i, true);
+        p.setEditKey(0);
+    }, 1.0f, "crt_loud");
     shot(dir + "/ui_moves.png", &session, [](LacquerProcessor& p) {
         p.page = 2;
         for (int i = 0; i < int(p.result().moves.size()); i += 2) p.takeMove(i, true);
@@ -108,11 +115,11 @@ int main(int argc, char** argv) {
     shot(dir + "/ui_checks.png", &session, [](LacquerProcessor& p) { p.page = 3; }, 1.0f, "key_checks");
     shot(dir + "/ui_sections.png", &session, [](LacquerProcessor& p) {
         p.page = 4;
-        p.setEditKey(3);
+        p.setEditKey(4);
         p.setShown(dGlue, 6.0f);
         p.setShown(sWidth, 125.0f);
         p.setShown(spIn, 1.0f);
-    }, 1.0f, "sec_3");
+    }, 1.0f, "sec_4", false, 3);
     shot(dir + "/ui_tray.png", &session, [](LacquerProcessor& p) { p.page = 4; p.setShown(spIn, 1.0f); p.setShown(spAmount, -14.0f); }, 1.0f, "sp_type", true);
     shot(dir + "/ui_empty.png", nullptr, nullptr, 1.0f);
     shot(dir + "/ui_75.png", &session, [](LacquerProcessor& p) { p.page = 2; p.takeAll(); }, 0.75f);

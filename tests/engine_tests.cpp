@@ -182,6 +182,38 @@ int main() {
         check(before < -80 && after > -40, "a section's own setting changes that section only", "difference before " + num(before, 0) + " dB, after " + num(after, 0) + " dB");
     }
 
+    // ---- a section's own TARGET: the verses driven less than the song, the choruses as they were
+    {
+        auto a = engine(), b = engine();
+        const float own = v[lTarget] - 2.5f;
+        for (auto* e : {a.get(), b.get()}) {
+            e->setMeasuredInput(-26.0, true);
+            e->song().edit([&](SongMap& m) {
+                m.addMark(0, 1); m.addMark(8, 2); m.addMark(24, 3); m.addMark(40, 2); m.addMark(56, 3);
+                if (e == b.get()) { m.has[2][lTarget] = true; m.val[2][lTarget] = own; }
+            });
+        }
+        Values w = v;
+        w[lGuard] = 0.0f;
+        const Run ra = run(*a, s, w, 512), rb = run(*b, s, w, 512);
+        auto at = [&](const Run& r, double t0s, double t1s) {
+            const size_t i0 = size_t(t0s * kFs), i1 = size_t(t1s * kFs);
+            std::vector<float> l(r.L.begin() + long(i0), r.L.begin() + long(i1)), rr(r.R.begin() + long(i0), r.R.begin() + long(i1));
+            return lufs(l, rr);
+        };
+        const double verse = at(rb, 5.0, 11.5) - at(ra, 5.0, 11.5), chorus = at(rb, 13.0, 19.5) - at(ra, 13.0, 19.5);
+        check(verse < -1.0 && verse > -2.8 && std::abs(chorus) < 0.3, "a verse's own TARGET 2.5 dB under the song plays it quieter, and leaves the chorus alone",
+              "verse " + num(verse, 2) + " dB, chorus " + num(chorus, 2) + " dB");
+        // The change glides in over a beat (bar 5 starts at 8 s; a beat is 0.5 s): no step at the mark.
+        double worst = 0;
+        for (size_t i = size_t(7.9 * kFs); i < size_t(8.6 * kFs); i += 480) {
+            std::vector<float> l(rb.L.begin() + long(i), rb.L.begin() + long(i + 480)), r(rb.R.begin() + long(i), rb.R.begin() + long(i + 480));
+            double m = 0; for (size_t j = 0; j < l.size(); ++j) m = std::max(m, double(std::abs(l[j])));
+            worst = std::max(worst, m);
+        }
+        check(finite(rb) && worst <= lq::dbToGain(w[lCeiling] + 0.2), "and the change between sections stays under the ceiling");
+    }
+
     // ---- the hidden space
     {
         auto a = engine(), b = engine();
@@ -237,11 +269,11 @@ int main() {
         bool harshChorus = false, rumble = false, mono = false, loud = false;
         std::string list;
         for (const auto& m : res.moves) {
-            list += m.module + "/" + std::string(keyName(m.key)) + ":" + m.what + "; ";
+            list += m.module + "/" + defaultKeyName(m.key) + ":" + m.what + "; ";
             if (m.param == cHarsh && m.key == 3) harshChorus = true;
             if (m.param == cRumble) rumble = true;
             if (m.param == sMono) mono = true;
-            if (m.param == lTarget) loud = true;
+            if (m.param == lTarget && m.key == 0) loud = true;
         }
         check(res.any && res.keyHeard[3] && res.keyHeard[2], "the listening pass hears each section");
         check(harshChorus, "a harsh chorus gets a chorus-only HARSH move", list);
@@ -254,6 +286,31 @@ int main() {
         int looks = 0;
         for (const auto& c : res.checks) looks += c.ok ? 0 : 1;
         check(looks >= 2, "the checks flag rumble and the off-centre low end", std::to_string(looks) + " to look at");
+    }
+
+    // ---- section lift: pushed hard, the limiter flattens the loud choruses against the verses;
+    // the assistant gives the verses their own, lower target to win some of that back.
+    {
+        auto e = engine();
+        e->song().edit([](SongMap& m) { m.addMark(0, 1); m.addMark(8, 2); m.addMark(24, 4); m.addMark(40, 2); m.addMark(56, 4); });
+        e->setMeasuredInput(lufs(s.L, s.R), true);
+        e->analyser().reset();
+        e->analyser().stats().clear();
+        e->setListening(true);
+        Values w = v;
+        w[lTarget] = -7.0f; w[lGuard] = 0.0f; w[lClip] = 0.0f;
+        run(*e, s, w, 512);
+        e->setListening(false);
+        Values sec[kNumKeys];
+        for (int k = 0; k < kNumKeys; ++k) sec[k] = e->valuesFor(k, w);
+        const auto c = contrastFrom(e->analyser().stats());
+        const Result res = assist(e->analyser().stats(), genreTarget(0), w, sec, Taste{}, false);
+        const Move* lift = nullptr;
+        for (const auto& m : res.moves) if (m.kind == mkLift && m.key == 2) lift = &m;
+        check(c.loud == 4 && c.ok[2] && c.mixGap[2] - c.masterGap[2] > 0.8, "the limiter evens out the choruses against the verses",
+              "mix " + num(c.mixGap[2], 1) + " dB apart, master " + num(c.masterGap[2], 1) + " dB");
+        check(lift && lift->full < w[lTarget] - 0.3f && lift->full >= w[lTarget] - 3.0f, "the verses get their own, lower TARGET",
+              lift ? lift->what + ": " + lift->why : std::string("no move"));
     }
 
     // ---- cost

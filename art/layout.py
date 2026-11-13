@@ -147,17 +147,20 @@ toggle("a_learn", 346, ROW_A - 4, "ON", "OFF", name="LEARN", set_="up")
 button("a_listen", 412, ROW_A - 20, "LISTEN", w=54, h=22, set_=True)
 button("a_take", 412, ROW_A + 14, "TAKE ALL", w=54, h=22)
 
-# Sections: SONG, five numbered section keys (named on a strip of tape) and MARK.
+# Sections: SONG, eight numbered section keys (named on a strip of tape), and FOLLOW over MARK.
 SECT_Y = 604
-SECT_NAMES = ["intro", "verse", "chorus", "bridge", "outro"]
-button("sec_song", 62, SECT_Y, "SONG", w=48, h=22, key=True, selected=False)
+SECT_NAMES = ["intro", "verse", "pre", "chorus", "bridge", "solo", "break", "outro"]   # the tape, as the mockup shows it
+NUM_SECT = 8
+SECT_PITCH = 36.0
+button("sec_song", 58, SECT_Y, "SONG", w=40, h=22, key=True, selected=False)
 SECT_KEYS = ["sec_song"]
-for i in range(5):
-    button(f"sec_{i + 1}", 122 + i * 50, SECT_Y, str(i + 1), w=40, h=22, key=True, selected=False)
+for i in range(NUM_SECT):
+    button(f"sec_{i + 1}", 104 + i * SECT_PITCH, SECT_Y, str(i + 1), w=30, h=22, key=True, selected=False)
     SECT_KEYS.append(f"sec_{i + 1}")
-button("sec_mark", 404, SECT_Y, "MARK", w=54, h=22)
-SECT_TAPE = {"x": 222, "y": 580, "w": 246, "h": 17, "angle": -0.5}
-SECT_LABEL = {"x": 234, "y": 629, "text": "SECTIONS", "x0": 38, "x1": 431}
+button("sec_follow", 414, SECT_Y - 13, "FOLLOW", w=52, h=20, set_=True)
+button("sec_mark", 414, SECT_Y + 14, "MARK", w=52, h=20)
+SECT_TAPE = {"x": 104 + (NUM_SECT - 1) * SECT_PITCH / 2, "y": 580, "w": NUM_SECT * SECT_PITCH + 4, "h": 17, "angle": -0.4}
+SECT_LABEL = {"x": 206, "y": 629, "text": "SECTIONS", "x0": 38, "x1": 374}
 
 # ---- the six processing cassettes: an IDEA lamp, three knobs, a switch, an IN button each
 STRIP_ROWS = (186, 292, 398)
@@ -286,7 +289,7 @@ def lit_rect(c):
 # Lit crops the mockup lays over the photo: each screen and section key lit green and pressed in, MARK lit amber.
 LIT_GROUPS = {kid: [kid] for kid, _ in SCREEN_KEYS}
 LIT_GROUPS.update({"key_" + k: [k] for k in SECT_KEYS})
-LIT_GROUPS["mark"] = ["sec_mark"]
+LIT_GROUPS["mark"] = ["sec_follow", "sec_mark"]
 LIT_GROUPS["asst"] = ["a_listen", "a_take"]
 LIT_GROUPS["ideas"] = [f"{c}_idea" for c in ("clean", "tone", "dyn", "col", "st", "loud")]
 LIT_GROUPS["ins"] = [f"{c}_in" for c in ("clean", "tone", "dyn", "col", "st", "loud")]
