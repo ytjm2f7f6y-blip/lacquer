@@ -82,7 +82,8 @@ const help::Entry* helpFor(const juce::String& id) {
 // The tube's phosphor.
 const juce::Colour kText(0xffa6ffc9), kCurve(0xffd4ffe4), kGlow(0x8c5dff9a), kFill(0x1f58e08f), kInk(0xff0b2216);
 
-const char* const kScreenKeys[5] = {"key_bal", "key_loud", "key_moves", "key_checks", "key_sect"};
+constexpr int kNumPages = 6;
+const char* const kScreenKeys[kNumPages] = {"key_bal", "key_loud", "key_moves", "key_checks", "key_sect", "key_detail"};
 const char* const kModules[6] = {"clean", "tone", "dyn", "col", "st", "loud"};
 const char* const kModuleNames[6] = {"CLEAN", "TONE", "DYNAMICS", "COLOUR", "STEREO", "LOUDNESS"};
 
@@ -138,7 +139,8 @@ LacquerEditor::LacquerEditor(LacquerProcessor& p) : AudioProcessorEditor(p), pro
 void LacquerEditor::setScale(float s) {
     s_ = juce::jlimit(0.75f, 1.5f, s);
     proc_.uiScale = s_;
-    setSize(int(std::round(W * s_)), int(std::round((H + trayH() + kHelpH) * s_)));
+    helpOn_ = proc_.showHelpStrip();
+    setSize(int(std::round(W * s_)), int(std::round((H + trayH() + helpH()) * s_)));
     repaint();
 }
 
@@ -165,7 +167,7 @@ int LacquerEditor::selIndex(int ci) const { return juce::jlimit(0, std::max(0, k
 
 bool LacquerEditor::lit(int ci) const {
     const auto& c = kControls[ci];
-    for (int k = 0; k < 5; ++k) if (is(c, kScreenKeys[k])) return proc_.page == k;
+    for (int k = 0; k < kNumPages; ++k) if (is(c, kScreenKeys[k])) return proc_.page == k;
     if (is(c, "sec_song")) return proc_.litKey() == 0;
     if (const int k = sectionKeyOf(c.id)) return proc_.litKey() == k;
     if (is(c, "sec_mark")) return proc_.marking();
@@ -237,7 +239,7 @@ void LacquerEditor::endEdit(int p) {
 
 void LacquerEditor::click(int ci, const juce::MouseEvent& e) {
     const auto& c = kControls[ci];
-    for (int k = 0; k < 5; ++k) if (is(c, kScreenKeys[k])) { proc_.page = k; moveScroll_ = 0; repaint(); return; }
+    for (int k = 0; k < kNumPages; ++k) if (is(c, kScreenKeys[k])) { proc_.page = k; moveScroll_ = 0; repaint(); return; }
     if (is(c, "sec_song")) { proc_.tapKey(0); repaint(); return; }
     if (const int k = sectionKeyOf(c.id)) {
         if (e.mods.isPopupMenu()) { showNameMenu(k); return; }   // right-click: what this key is called
@@ -255,6 +257,7 @@ void LacquerEditor::click(int ci, const juce::MouseEvent& e) {
     if (is(c, "preset_prev") || is(c, "preset_next")) { stepPreset(is(c, "preset_next") ? 1 : -1); return; }
     const int p = paramOf(ci);
     if (p < 0) return;
+    followDetail(p);
     if (c.type == Toggle || c.type == Button) {
         beginEdit(p);
         proc_.setShown(p, value(ci) >= 0.5f ? 0.0f : 1.0f);
@@ -275,6 +278,7 @@ void LacquerEditor::showSetMenu() {
     for (float s : {0.75f, 1.0f, 1.25f, 1.5f})
         size.addItem(juce::String(juce::roundToInt(s * 100)) + " %", true, std::abs(s_ - s) < 0.01f, [this, s] { setScale(s); });
     m.addSubMenu("Window size", size);
+    m.addItem("Show the help strip", true, helpOn_, [this] { proc_.setShowHelpStrip(!helpOn_); setScale(s_); });
     m.addSeparator();
     m.addItem("Save preset...", [this] {
         auto* w = new juce::AlertWindow("Save preset", "A name for these settings:", juce::MessageBoxIconType::NoIcon);
@@ -292,6 +296,7 @@ void LacquerEditor::showSetMenu() {
     m.addItem("Clear the references (" + juce::String(proc_.numRefs()) + ")", proc_.numRefs() > 0, false, [this] { proc_.clearReferences(); repaint(); });
     m.addItem("Name the sections...", [this] { renameSections(); });
     m.addItem("Reset the integrated loudness", [this] { proc_.resetIntegrated(); });
+    m.addItem("Forget the song's loudness (a new mix)", [this] { proc_.forgetLoudness(); repaint(); });
     m.addSeparator();
     m.addItem("Lacquer " JucePlugin_VersionString, false, false, [] {});
     m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withMousePosition());
@@ -340,7 +345,7 @@ struct Ink {
     juce::Graphics& g;
     juce::Typeface::Ptr tf;
     float ox, oy;
-    juce::Font f(float h, float kern = 0.05f) const { return juce::Font(juce::FontOptions(tf).withHeight(h * 1.12f)).withExtraKerningFactor(kern); }
+    juce::Font f(float h, float kern = 0.05f) const { return juce::Font(juce::FontOptions(tf).withHeight(h * 1.17f)).withExtraKerningFactor(kern); }
     float width(const juce::String& s, float h, float kern = 0.05f) const { return juce::GlyphArrangement::getStringWidth(f(h, kern), s); }
     // align: 0 left, 1 centre, 2 right; x and the baseline in screen coordinates
     void text(const juce::String& s, float x, float base, float h, int align = 0, float alpha = 1.0f, juce::Colour c = kText, float kern = 0.05f) const {
@@ -389,6 +394,7 @@ void LacquerEditor::drawScreen(juce::Graphics& g) {
         case 2: drawMoves(g); break;
         case 3: drawChecks(g); break;
         case 4: drawSections(g); break;
+        case 5: drawDetail(g); break;
         default: drawBalance(g); break;
     }
     if (clock_ < noteUntil_ && note_.isNotEmpty()) {
@@ -480,13 +486,41 @@ void LacquerEditor::drawBalance(juce::Graphics& g) {
         ink.text(fr.second, X(fr.first), 205, 10.0f, 1, 0.62f);
     ink.text("Hz", 372, 205, 10.0f, 2, 0.62f);
     const int tsel = juce::roundToInt(proc_.songValue(lq::aTarget));
-    const juce::String l1 = "BALANCE   " + keyLabel(key) + "   " + kDot.trim() + "   " + up(juce::String::fromUTF8(t.name.c_str()));
+    const juce::String l1 = "BALANCE   " + keyLabel(key);
+    // The target, top right: a style to step through, references to add and keep, or your masters.
+    {
+        auto chip = [&](float x0, float x1, const juce::String& text, bool enabled, int arrow = 0) {
+            const float a = enabled ? 1.0f : 0.3f;
+            const auto r = juce::Rectangle<float>(ink.p(x0, 11), ink.p(x1, 26));
+            g.setColour(kText.withAlpha(0.07f * a)); g.fillRoundedRectangle(r, 2.0f);
+            g.setColour(kText.withAlpha(0.6f * a)); g.drawRoundedRectangle(r, 2.0f, 0.8f);
+            if (arrow) {
+                const float c0 = (x0 + x1) / 2, d = float(arrow);
+                juce::Path tri; tri.addTriangle(ink.p(c0 + 3.0f * d, 18.5f), ink.p(c0 - 2.0f * d, 15), ink.p(c0 - 2.0f * d, 22));
+                g.setColour(kText.withAlpha(a)); g.fillPath(tri);
+                return;
+            }
+            juce::String tx = text;
+            while (tx.length() > 3 && ink.width(tx, 10.5f) > x1 - x0 - 6) tx = tx.dropLastCharacters(1);
+            ink.text(tx, (x0 + x1) / 2, 22.5f, 10.5f, 1, a);
+        };
+        if (tsel == 0) {
+            chip(220, 236, {}, true, -1);
+            chip(236, 352, up(proc_.styleName(proc_.genre())) + (proc_.styleIsYours(proc_.genre()) ? " *" : ""), true);
+            chip(352, 368, {}, true, 1);
+        } else if (tsel == 1) {
+            chip(220, 290, "+ ADD", true);
+            chip(296, 368, "SAVE AS STYLE", proc_.numRefs() > 0);
+        } else {
+            ink.text("YOUR MASTERS: " + juce::String(proc_.numMine()), 368, 22.5f, 10.5f, 2, 0.8f);
+        }
+    }
     juce::String l2;
     if (!r.any) l2 = "PRESS LISTEN AND PLAY THE SONG THROUGH ONCE";
     else if (proc_.litKey() != key) l2 = "THIS SECTION WASN'T HEARD: SHOWING THE SONG";
     else l2 = juce::String(total ? juce::roundToInt(100.0 * inside / total) : 100) + "% INSIDE THE CORRIDOR   " + kDot.trim() + "   " +
               (outside ? juce::String(outside) + (outside > 1 ? " AREAS" : " AREA") + " OUTSIDE" : juce::String("NOTHING OUTSIDE"));
-    if (tsel == 0) l2 = l2 + (r.any ? "" : "");
+    if (tsel == 1 && proc_.numRefs() == 0 && r.any) l2 = "ADD REFERENCE TRACKS, OR DROP THEM ON THE SCREEN";
     header(g, l1, l2);
 }
 
@@ -587,7 +621,7 @@ int LacquerEditor::moveRowAt(juce::Point<float> pt) const {
     if (x < 8 || x > 372 || y < 48) return -1;
     const int row = int((y - 48) / 25.0f);
     const int i = row + moveScroll_;
-    if (row < 0 || row >= 6 || i >= int(proc_.result().moves.size())) return -1;
+    if (row < 0 || row >= movesShown() || i >= int(proc_.result().moves.size())) return -1;
     return i;
 }
 
@@ -597,7 +631,7 @@ void LacquerEditor::drawMoves(juce::Graphics& g) {
     int taken = 0;
     for (const auto& m : r.moves) taken += m.taken ? 1 : 0;
     const int n = int(r.moves.size());
-    for (int row = 0; row < 6 && row + moveScroll_ < n; ++row) {
+    for (int row = 0; row < movesShown() && row + moveScroll_ < n; ++row) {
         const auto& m = r.moves[size_t(row + moveScroll_)];
         const float top = 50.0f + row * 25.0f;
         const float a = m.taken ? 1.0f : 0.5f;
@@ -620,7 +654,7 @@ void LacquerEditor::drawMoves(juce::Graphics& g) {
         }
         ink.text(juce::String(m.conf) + "%", 368, top + 10, 11.0f, 2, 0.8f * a);
     }
-    if (n > 6) ink.text(juce::String(moveScroll_ + 1) + kMinus + juce::String(std::min(n, moveScroll_ + 6)) + " OF " + juce::String(n) + ": SCROLL FOR MORE", 368, 205, 10.0f, 2, 0.62f);
+    if (n > 6) ink.text(juce::String(moveScroll_ + 1) + kMinus + juce::String(std::min(n, moveScroll_ + 5)) + " OF " + juce::String(n) + ": SCROLL FOR MORE", 368, 205, 10.0f, 2, 0.62f);
     juce::String l1 = "MOVES   " + juce::String(n) + " SUGGESTED   " + kDot.trim() + "   " + juce::String(taken) + " TAKEN";
     juce::String l2 = "AMOUNT " + juce::String(juce::roundToInt(proc_.songValue(lq::aAmount))) + "%   " + kDot.trim() + "   CLICK A MOVE TO TAKE OR SKIP IT";
     if (!r.any) { l1 = "MOVES"; l2 = "PRESS LISTEN AND PLAY THE SONG THROUGH ONCE"; }
@@ -682,7 +716,7 @@ double LacquerEditor::ppqAtX(float x) const { return double(x - (kFaceX - 2 + 8)
 int LacquerEditor::blockAt(juce::Point<float> pt, bool& nearEdge) const {
     nearEdge = false;
     const auto o = sc(0, 0);
-    if (pt.y < o.y + 46 || pt.y > o.y + 78) return -1;
+    if (pt.y < o.y + 68 || pt.y > o.y + 92) return -1;
     const auto& m = proc_.songMap();
     for (int i = 0; i < m.count; ++i) {
         const float x0 = xOfPpq(m.marks[i].ppq), x1 = i + 1 < m.count ? xOfPpq(m.marks[i + 1].ppq) : o.x + 372;
@@ -697,7 +731,7 @@ struct SoftKey { int id; float x0, x1; };
 enum { skPrev, skType, skNext, skSplit, skJoin, skAdd, kNumSoftKeys };
 constexpr SoftKey kSoftKeys[kNumSoftKeys] = {{skPrev, 12, 26}, {skType, 28, 138}, {skNext, 140, 154},
                                              {skSplit, 164, 206}, {skJoin, 212, 250}, {skAdd, 260, 368}};
-constexpr float kSoftY0 = 89, kSoftY1 = 104;
+constexpr float kSoftY0 = 103, kSoftY1 = 117;
 }  // namespace
 
 int LacquerEditor::softKeyAt(juce::Point<float> pt) const {
@@ -714,30 +748,32 @@ void LacquerEditor::drawSections(juce::Graphics& g) {
     const int lk = proc_.litKey();
     const double q = proc_.barLength();
     if (selMark_ >= m.count) selMark_ = m.count - 1;
+    drawLane(g);
+    constexpr float b0 = 71, b1 = 89;   // the blocks
     for (int i = 0; i < m.count; ++i) {
         const float x0 = xOfPpq(m.marks[i].ppq) - (kFaceX - 2), x1 = (i + 1 < m.count ? xOfPpq(m.marks[i + 1].ppq) - (kFaceX - 2) : 372.0f);
         const bool on = lk > 0 && m.marks[i].key == lk;
-        const auto r = juce::Rectangle<float>(ink.p(x0 + 1, 50), ink.p(std::max(x0 + 3, x1 - 1), 74));
+        const auto r = juce::Rectangle<float>(ink.p(x0 + 1, b0), ink.p(std::max(x0 + 3, x1 - 1), b1));
         g.setColour(kText.withAlpha(on ? 0.88f : 0.10f)); g.fillRoundedRectangle(r, 2.0f);
         g.setColour(kText.withAlpha(on ? 1.0f : 0.55f)); g.drawRoundedRectangle(r, 2.0f, 0.8f);
         if (i == selMark_) {   // the picked block: a bright frame, and a handle on the edge that moves it
             g.setColour(kCurve); g.drawRoundedRectangle(r.expanded(1.5f), 3.0f, 1.6f);
             g.fillRect(juce::Rectangle<float>(r.getX() - 1.5f, r.getY() + 5, 3.0f, r.getHeight() - 10));
         }
-        if (x1 - x0 > 9) ink.text(m.marks[i].key == 0 ? juce::String("S") : juce::String(m.marks[i].key), (x0 + x1) / 2, 66.5f, 12.0f, 1, 1.0f, on ? kInk : kText);
+        if (x1 - x0 > 9) ink.text(m.marks[i].key == 0 ? juce::String("S") : juce::String(m.marks[i].key), (x0 + x1) / 2, b1 - 5.0f, 12.0f, 1, 1.0f, on ? kInk : kText);
     }
     if (m.count > 0 && m.marks[0].ppq > 0.01) {   // before the first mark: the song settings
         const float x1 = xOfPpq(m.marks[0].ppq) - (kFaceX - 2);
-        g.setColour(kText.withAlpha(0.05f)); g.fillRect(juce::Rectangle<float>(ink.p(8, 50), ink.p(x1 - 1, 74)));
+        g.setColour(kText.withAlpha(0.05f)); g.fillRect(juce::Rectangle<float>(ink.p(8, b0), ink.p(x1 - 1, b1)));
     }
     {   // the playhead, playing or not
         const float x = xOfPpq(proc_.playheadPpq());
-        g.setColour(kCurve.withAlpha(proc_.playing() ? 1.0f : 0.55f)); g.fillRect(x - 0.6f, ink.p(0, 46).y, 1.2f, 32.0f);
+        g.setColour(kCurve.withAlpha(proc_.playing() ? 1.0f : 0.55f)); g.fillRect(x - 0.6f, ink.p(0, 44).y, 1.2f, b1 - 44 + 2);
     }
     // Bar numbers under the blocks.
     const double end = proc_.songEndPpq(), bars = end / q;
     const int step = bars > 120 ? 32 : (bars > 60 ? 16 : 8);
-    for (int b = 0; b * q < end; b += step) ink.text(juce::String(b + 1), xOfPpq(b * q) - (kFaceX - 2), 84, 9.5f, b == 0 ? 0 : 1, 0.5f);
+    for (int b = 0; b * q < end; b += step) ink.text(juce::String(b + 1), xOfPpq(b * q) - (kFaceX - 2), 99, 9.5f, b == 0 ? 0 : 1, 0.5f);
 
     // The soft keys.
     const bool picked = selMark_ >= 0 && selMark_ < m.count;
@@ -805,15 +841,15 @@ void LacquerEditor::drawSections(juce::Graphics& g) {
     }
     if (proc_.marking()) foot = proc_.playing() ? "Tap a number as each section starts. Press MARK again to finish."
                                                 : "Put the playhead on a bar and tap a number to mark it there.";
-    ink.text(title, 14, 120, 10.5f, 0, 1.0f, kText, 0.04f);
+    ink.text(title, 14, 132, 10.5f, 0, 1.0f, kText, 0.04f);
     for (size_t i = 0; i < rows.size() && i < 4; ++i) {
-        const float y = 135.0f + float(i) * 14.5f;
+        const float y = 146.0f + float(i) * 13.5f;
         ink.text(rows[i].first, 14, y, 11.5f, 0, 1.0f, kText, 0.05f);
         juce::String what = rows[i].second;
         while (what.length() > 4 && ink.width(what, 11.0f, 0.02f) > 262) what = what.dropLastCharacters(4) + "...";
         ink.text(what, 104, y, 11.0f, 0, 0.78f, kText, 0.02f);
     }
-    if (rows.size() > 4) ink.text("and " + juce::String(int(rows.size()) - 4) + " more", 366, 120, 10.0f, 2, 0.6f);
+    if (rows.size() > 4) ink.text("and " + juce::String(int(rows.size()) - 4) + " more", 366, 132, 10.0f, 2, 0.6f);
     ink.text(foot, 14, 201, 10.5f, 0, 0.74f);
     juce::String l1 = "SECTIONS   EDITING " + (lk == 0 ? juce::String("THE WHOLE SONG") : juce::String(lk) + " " + up(proc_.sectionName(lk)));
     if (proc_.playing() && !proc_.follow() && m.count > 0) l1 << "   " << kDot.trim() << "   HELD";
@@ -878,8 +914,26 @@ void LacquerEditor::screenClick(juce::Point<float> pt, const juce::MouseEvent& e
         const int i = moveRowAt(pt);
         if (i >= 0) proc_.takeMove(i, !proc_.result().moves[size_t(i)].taken);
     } else if (proc_.page == 0) {
-        if (pt.y < o.y + 28 && juce::roundToInt(proc_.songValue(lq::aTarget)) == 0)   // the target's name: another style
-            proc_.setGenre(proc_.genre() + (e.mods.isShiftDown() || e.mods.isPopupMenu() ? -1 : 1));
+        switch (balanceChipAt(pt)) {
+            case 0: proc_.setGenre(proc_.genre() - 1); break;
+            case 1: proc_.setGenre(proc_.genre() + 1); break;
+            case 2: {
+                juce::PopupMenu m;
+                for (int i = 0; i < proc_.numStyles(); ++i) m.addItem(proc_.styleName(i), true, i == proc_.genre(), [this, i] { proc_.setGenre(i); repaint(); });
+                if (proc_.styleIsYours(proc_.genre())) {
+                    m.addSeparator();
+                    m.addItem("Remove \"" + proc_.styleName(proc_.genre()) + "\"", [this] { proc_.removeStyle(proc_.genre()); repaint(); });
+                }
+                m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withMousePosition());
+                break;
+            }
+            case 3: chooseReferences(); break;
+            case 4: askStyleName(); break;
+            default: break;
+        }
+        (void)o;
+    } else if (proc_.page == 5) {
+        detailClick(pt, e);
     } else if (proc_.page == 4) {
         const auto& m = proc_.songMap();
         const int sk = softKeyAt(pt);
@@ -920,6 +974,370 @@ void LacquerEditor::screenClick(juce::Point<float> pt, const juce::MouseEvent& e
         if (proc_.playing()) proc_.setFollow(false);
     }
     repaint();
+}
+
+
+// ---------------------------------------------------------------------------
+// DETAIL: what the faceplate's knobs don't reach, for the module you last touched.
+namespace {
+const char* const kTabs[4] = {"TONE", "DYNAMICS", "LOUDNESS", "OUTPUT"};
+constexpr float kTabY0 = 44, kTabY1 = 57;
+float tabX0(int t) { return 12.0f + t * 90.0f; }
+float tabX1(int t) { return tabX0(t) + 84.0f; }
+// The EQ graph.
+constexpr float kEqY0 = 64, kEqY1 = 156, kEqMid = 110, kEqPerDb = 5.5f;
+float eqX(double f) { return float(8 + 364 * std::log(f / 20.0) / std::log(1000.0)); }
+double eqF(float x) { return 20.0 * std::pow(1000.0, (x - 8) / 364.0); }
+float eqY(double db) { return float(kEqMid - db * kEqPerDb); }
+const int kBandDb[4] = {lq::tLow, lq::tMud, lq::tPres, lq::tAir}, kBandHz[4] = {lq::tLowHz, lq::tMudHz, lq::tPresHz, lq::tAirHz},
+          kBandPl[4] = {lq::tLowPl, lq::tMudPl, lq::tPresPl, lq::tAirPl};
+const char* const kBandName[4] = {"LOW", "MUD", "PRESENCE", "AIR"};
+const char* const kBandTag[4] = {"L", "M", "P", "A"};
+// A row of the DYNAMICS / LOUDNESS / OUTPUT tabs: a name, and a value stepped with arrows.
+struct Row { int p; const char* name; };
+const Row kDynRows[4] = {{lq::dAttack, "ATTACK"}, {lq::dRelease, "RELEASE"}, {lq::dRatio, "RATIO"}, {lq::dChan, "CHANNELS"}};
+const Row kLoudRows[2] = {{lq::lStyle, "STYLE"}, {lq::lRelease, "RELEASE"}};
+const Row kOutRows[1] = {{lq::oCodecRate, "CODEC"}};
+constexpr float kRowY0 = 140, kRowPitch = 16;
+// The arrows and the value: x 214..368.
+constexpr float kArrL0 = 214, kArrL1 = 228, kArrR0 = 354, kArrR1 = 368;
+}  // namespace
+
+void LacquerEditor::followDetail(int p) {
+    const int m = moduleOf(p);
+    int tab = -1;
+    if (m == 1) tab = 0;
+    else if (m == 2) tab = 1;
+    else if (p >= lq::loudIn && p <= lq::lGuard) tab = 2;
+    else if (p == lq::lStyle || p == lq::lRelease) tab = 2;
+    else if (p == lq::oListen || p == lq::oCodec || p == lq::oDither || p == lq::oMonitor || p == lq::oMatch || p == lq::oBefore || p == lq::oCodecRate) tab = 3;
+    else if (p >= lq::tMud && p <= lq::tPhase) tab = 0;
+    else if (p >= lq::dAttack && p <= lq::dRatio) tab = 1;
+    if (tab >= 0 && tab != proc_.detailTab) { proc_.detailTab = tab; if (proc_.page == 5) repaintPts({kFaceX, kFaceY, kFaceW, kFaceH}); }
+}
+
+void LacquerEditor::stepChoice(int p, int dir) {
+    const auto& d = lq::def(p);
+    const int n = d.kind == lq::kBool ? 2 : d.nChoices;
+    const int cur = juce::roundToInt(proc_.shownValue(p));
+    beginEdit(p);
+    proc_.setShown(p, float(((cur + dir) % n + n) % n));
+    endEdit(p);
+}
+
+void LacquerEditor::drawDetail(juce::Graphics& g) {
+    const Ink ink{g, art_->legend, kFaceX - 2, kFaceY - 2};
+    const int tab = juce::jlimit(0, 3, proc_.detailTab);
+    for (int t = 0; t < 4; ++t) {
+        const auto r = juce::Rectangle<float>(ink.p(tabX0(t), kTabY0), ink.p(tabX1(t), kTabY1));
+        g.setColour(kText.withAlpha(t == tab ? 0.85f : 0.07f)); g.fillRoundedRectangle(r, 2.0f);
+        g.setColour(kText.withAlpha(0.6f)); g.drawRoundedRectangle(r, 2.0f, 0.8f);
+        ink.text(kTabs[t], (tabX0(t) + tabX1(t)) / 2, kTabY1 - 3.5f, 10.5f, 1, 1.0f, t == tab ? kInk : kText);
+    }
+    auto arrows = [&](float y, const juce::String& value, bool enabled = true) {
+        const float a = enabled ? 1.0f : 0.3f;
+        for (int side = 0; side < 2; ++side) {
+            const float x0 = side ? kArrR0 : kArrL0, x1 = side ? kArrR1 : kArrL1, cx0 = (x0 + x1) / 2, d = side ? 1.0f : -1.0f;
+            const auto r = juce::Rectangle<float>(ink.p(x0, y - 10.5f), ink.p(x1, y + 3));
+            g.setColour(kText.withAlpha(0.07f * a)); g.fillRoundedRectangle(r, 2.0f);
+            g.setColour(kText.withAlpha(0.6f * a)); g.drawRoundedRectangle(r, 2.0f, 0.8f);
+            juce::Path tri;
+            tri.addTriangle(ink.p(cx0 + 3.0f * d, y - 3.8f), ink.p(cx0 - 2.0f * d, y - 7.3f), ink.p(cx0 - 2.0f * d, y - 0.3f));
+            g.setColour(kText.withAlpha(a)); g.fillPath(tri);
+        }
+        ink.text(value, (kArrL1 + kArrR0) / 2, y, 11.0f, 1, a);
+    };
+    auto valueOf = [&](int p) { auto* prm = proc_.param(p); return up(prm->getText(prm->convertTo0to1(proc_.shownValue(p)), 32)); };
+    auto trace = [&](const float* hist, float y0, float y1, float maxDb, const juce::String& label) {
+        g.setColour(kText.withAlpha(0.06f)); g.fillRect(juce::Rectangle<float>(ink.p(8, y0), ink.p(372, y1)));
+        juce::Path p;
+        for (int i = 0; i < 240; ++i) {
+            const float v = hist[(histPos_ + i) % 240];
+            const auto pt = ink.p(8 + 364 * i / 239.0f, y0 + (y1 - y0) * juce::jlimit(0.0f, 1.0f, v / maxDb));
+            if (i == 0) p.startNewSubPath(pt); else p.lineTo(pt);
+        }
+        ink.glowLine(p);
+        float now = 0;
+        for (int i = 0; i < 8; ++i) now = std::max(now, hist[(histPos_ + 239 - i) % 240]);
+        ink.text(label + "   " + kMinus + juce::String(now, 1) + " dB", 14, y1 + 11, 10.5f, 0, 0.9f);
+        ink.text(kMinus + juce::String(juce::roundToInt(maxDb)) + " dB", 366, y1 - 3, 9.5f, 2, 0.5f);
+    };
+    juce::String l1 = "DETAIL   " + juce::String(kTabs[tab]), l2;
+    const int lk = proc_.litKey();
+    if (lk > 0) l1 << "   " << kDot.trim() << "   " << keyLabel(lk);
+    if (tab == 0) {
+        // The EQ: the mid (bright) and the side (dashed), and the four bands' handles.
+        lq::Values v = proc_.valuesFor(lk);
+        for (int p = 0; p < lq::kNumParams; ++p) v[p] = proc_.shownValue(p);
+        lq::ToneParams tp = lq::Engine::toneParamsFrom(v);
+        tp.weight = 1;
+        for (int db : {-6, 0, 6}) {
+            juce::Path gl; gl.startNewSubPath(ink.p(8, eqY(db))); gl.lineTo(ink.p(372, eqY(db)));
+            ink.dashed(gl, 2, 3, 0.7f, kText.withAlpha(db == 0 ? 0.45f : 0.22f));
+            ink.text((db > 0 ? "+" : db < 0 ? kMinus : "") + juce::String(std::abs(db)), 14, eqY(db) - 2, 9.5f, 0, 0.5f);
+        }
+        juce::Path pm, ps;
+        bool sideMoves = false;
+        for (int i = 0; i <= 180; ++i) {
+            const double f = 20.0 * std::pow(1000.0, i / 180.0);
+            std::complex<double> hm, hs;
+            lq::toneResponseMS(tp, f, 48000.0, hm, hs);
+            const float ym = juce::jlimit(kEqY0, kEqY1, eqY(20 * std::log10(std::abs(hm) + 1e-9)));
+            const float ys = juce::jlimit(kEqY0, kEqY1, eqY(20 * std::log10(std::abs(hs) + 1e-9)));
+            sideMoves = sideMoves || std::abs(ym - ys) > 0.3f;
+            if (i == 0) { pm.startNewSubPath(ink.p(eqX(f), ym)); ps.startNewSubPath(ink.p(eqX(f), ys)); }
+            else { pm.lineTo(ink.p(eqX(f), ym)); ps.lineTo(ink.p(eqX(f), ys)); }
+        }
+        if (sideMoves) ink.dashed(ps, 4, 3, 1.4f, kCurve.withAlpha(0.75f));
+        ink.glowLine(pm);
+        for (int b = 0; b < 4; ++b) {
+            const float x = eqX(v[kBandHz[b]]), y = juce::jlimit(kEqY0 + 4, kEqY1 - 4, eqY(v[kBandDb[b]]));
+            const bool sel = b == toneBand_;
+            const auto c = ink.p(x, y);
+            g.setColour(sel ? kCurve : juce::Colour(0xff0b2216)); g.fillEllipse(c.x - 6.5f, c.y - 6.5f, 13, 13);
+            g.setColour(kCurve); g.drawEllipse(c.x - 6.5f, c.y - 6.5f, 13, 13, 1.2f);
+            ink.text(kBandTag[b], x, y + 3.6f, 9.5f, 1, 1.0f, sel ? kInk : kText);
+            const int pl = juce::roundToInt(v[kBandPl[b]]);
+            if (pl > 0) ink.text(pl == 1 ? "MID" : "SIDE", x, y + 17, 9.0f, 1, 0.8f);
+        }
+        for (const auto& fr : {std::pair<double, const char*>{50, "50"}, {100, "100"}, {200, "200"}, {500, "500"}, {1000, "1k"}, {2000, "2k"}, {5000, "5k"}, {10000, "10k"}})
+            ink.text(fr.second, eqX(fr.first), 167, 9.5f, 1, 0.55f);
+        // The picked band: where it works, and the phase of the whole.
+        const int b = toneBand_;
+        ink.text(juce::String(kBandName[b]) + "  " + num1(v[kBandDb[b]], true) + " dB  AT  " +
+                 (v[kBandHz[b]] >= 1000 ? juce::String(v[kBandHz[b]] / 1000.0, 1) + " kHz" : juce::String(juce::roundToInt(v[kBandHz[b]])) + " Hz"), 14, 184, 11.0f, 0, 1.0f);
+        arrows(184, juce::String(juce::StringArray{"STEREO", "MID", "SIDE"}[juce::jlimit(0, 2, juce::roundToInt(v[kBandPl[b]]))]));
+        const bool linear = proc_.songValue(lq::tPhase) >= 0.5f;
+        ink.text("PHASE", 14, 201, 11.0f, 0, 1.0f);
+        arrows(201, linear ? "LINEAR" : "NATURAL");
+        l2 = "DRAG A HANDLE: ACROSS IS FREQUENCY, UP AND DOWN IS GAIN";
+        if (linear) l2 = "LINEAR PHASE: " + juce::String(juce::roundToInt(1000.0 * proc_.latencyNow() / proc_.sampleRate())) + " MS OF DELAY IN ALL; DYNAMIC MODE RESTS";
+    } else if (tab == 1) {
+        trace(glueHist_, 62, 120, 8, "GLUE: GAIN REDUCTION");
+        for (int i = 0; i < 4; ++i) {
+            const float y = kRowY0 + 14 + i * kRowPitch;
+            ink.text(kDynRows[i].name, 14, y, 11.0f, 0, 1.0f);
+            arrows(y, valueOf(kDynRows[i].p));
+        }
+        l2 = "GLUE'S TIMING. A FAST ATTACK TAKES THE FRONT OFF THE HITS";
+    } else if (tab == 2) {
+        trace(limHist_, 62, 120, 8, "LIMITER: GAIN REDUCTION");
+        const auto& mt = proc_.meters();
+        ink.text("IN " + num1(mt.inLufs.load()) + "   OUT " + num1(mt.stLufs.load()) + " LUFS   DRIVE " + num1(mt.driveDb.load(), true) + " dB", 366, 131, 10.5f, 2, 0.8f);
+        for (int i = 0; i < 2; ++i) {
+            const float y = kRowY0 + 14 + i * kRowPitch;
+            ink.text(kLoudRows[i].name, 14, y, 11.0f, 0, 1.0f);
+            arrows(y, valueOf(kLoudRows[i].p));
+        }
+        const double cov = proc_.coverage();
+        ink.text(!proc_.loudnessKnown() ? juce::String("LEARNING THE SONG'S LOUDNESS AS IT PLAYS")
+                 : cov < 0 ? juce::String("LOUDNESS LEARNT FROM THE LAST PLAY")
+                           : "LOUDNESS LEARNT FROM " + juce::String(juce::roundToInt(cov * 100)) + "% OF THE SONG", 14, 190, 10.5f, 0, 0.8f);
+        {
+            const auto r = juce::Rectangle<float>(ink.p(300, 179), ink.p(368, 194));
+            g.setColour(kText.withAlpha(0.07f)); g.fillRoundedRectangle(r, 2.0f);
+            g.setColour(kText.withAlpha(0.6f)); g.drawRoundedRectangle(r, 2.0f, 0.8f);
+            ink.text("FORGET", 334, 190, 10.5f, 1, 1.0f);
+        }
+        static const char* const styles[3] = {"CLEAN HOLDS ON AND LETS GO SLOWLY", "PUNCHY LETS THE FRONT OF EACH HIT THROUGH", "DENSE LETS GO FAST: MORE LOUDNESS, LESS AIR"};
+        l2 = styles[juce::jlimit(0, 2, juce::roundToInt(proc_.songValue(lq::lStyle)))];
+    } else {
+        const auto& mt = proc_.meters();
+        ink.text("IN", 14, 76, 11.0f, 0, 1.0f);
+        ink.text(num1(mt.inLufs.load()) + " LUFS SHORT-TERM   " + num1(mt.inPeak.load()) + " dBFS PEAK", 70, 76, 11.0f, 0, 0.85f);
+        ink.text("OUT", 14, 92, 11.0f, 0, 1.0f);
+        ink.text(num1(mt.stLufs.load()) + " LUFS SHORT-TERM   " + num1(outPkHold_) + " dBTP PEAK", 70, 92, 11.0f, 0, 0.85f);
+        ink.text("BEFORE", 14, 108, 11.0f, 0, 1.0f);
+        ink.text("the mix turned " + num1(mt.beforeDb.load(), true) + " dB to match the master", 70, 108, 11.0f, 0, 0.85f);
+        const bool avail = proc_.codecAvailable();
+        ink.text("CODEC", 14, 124, 11.0f, 0, 1.0f);
+        if (!avail) ink.text(proc_.codecWhy(), 70, 124, 10.5f, 0, 0.7f);
+        else if (proc_.songValue(lq::oCodec) < 0.5f) ink.text("off: switch CODEC on to hear the master after encoding", 70, 124, 10.5f, 0, 0.7f);
+        else {
+            const float cp = proc_.codecPeak();
+            ink.text("after encoding the true peak reaches " + (cp > -100 ? num1(cp) + " dBTP" : juce::String("--")), 70, 124, 10.5f, 0, 0.85f);
+            if (cp > -0.05f) ink.text("OVER: LOWER THE CEILING", 366, 140, 10.5f, 2, 1.0f);
+        }
+        for (int i = 0; i < 1; ++i) {
+            const float y = 156;
+            ink.text(kOutRows[i].name, 14, y, 11.0f, 0, 1.0f);
+            arrows(y, valueOf(kOutRows[i].p), avail);
+        }
+        ink.text("The codec preview is for listening only: a little later than the song, never in a bounce.", 14, 186, 10.0f, 0, 0.6f, kText, 0.0f);
+        ink.text("BEFORE and LISTEN ON never reach a bounce either.", 14, 199, 10.0f, 0, 0.6f, kText, 0.0f);
+        l2 = "WHAT COMES IN, WHAT GOES OUT, AND HOW IT WILL BE HEARD";
+    }
+    header(g, l1, l2);
+}
+
+bool LacquerEditor::detailClick(juce::Point<float> pt, const juce::MouseEvent& e) {
+    const auto o = sc(0, 0);
+    const float x = pt.x - o.x, y = pt.y - o.y;
+    if (y >= kTabY0 && y <= kTabY1)
+        for (int t = 0; t < 4; ++t) if (x >= tabX0(t) && x <= tabX1(t)) { proc_.detailTab = t; repaint(); return true; }
+    const int tab = proc_.detailTab;
+    auto arrowAt = [&](float rowY) -> int {
+        if (y < rowY - 11 || y > rowY + 4) return 0;
+        if (x >= kArrL0 - 2 && x <= kArrL1 + 2) return -1;
+        if (x >= kArrR0 - 2 && x <= kArrR1 + 2) return 1;
+        if (x > kArrL1 && x < kArrR0) return e.mods.isPopupMenu() ? -1 : 1;
+        return 0;
+    };
+    if (tab == 0) {
+        // A handle?
+        lq::Values v = proc_.valuesFor(proc_.litKey());
+        for (int p = 0; p < lq::kNumParams; ++p) v[p] = proc_.shownValue(p);
+        int best = -1;
+        float bd = 11;
+        for (int b = 0; b < 4; ++b) {
+            const float d = juce::Point<float>(x, y).getDistanceFrom({eqX(v[kBandHz[b]]), juce::jlimit(kEqY0 + 4, kEqY1 - 4, eqY(v[kBandDb[b]]))});
+            if (d < bd) { bd = d; best = b; }
+        }
+        if (best >= 0) {
+            toneBand_ = best;
+            if (e.mods.isPopupMenu()) { stepChoice(kBandPl[best], 1); repaint(); return true; }
+            dragBand_ = best; drag_ = kScreen;
+            beginEdit(kBandDb[best]); beginEdit(kBandHz[best]);
+            repaint();
+            return true;
+        }
+        if (const int a = arrowAt(184)) { stepChoice(kBandPl[toneBand_], a); repaint(); return true; }
+        if (const int a = arrowAt(201)) { stepChoice(lq::tPhase, a); repaint(); return true; }
+        return false;
+    }
+    if (tab == 1) {
+        for (int i = 0; i < 4; ++i) if (const int a = arrowAt(kRowY0 + 14 + i * kRowPitch)) { stepChoice(kDynRows[i].p, a); repaint(); return true; }
+        return false;
+    }
+    if (tab == 2) {
+        for (int i = 0; i < 2; ++i) if (const int a = arrowAt(kRowY0 + 14 + i * kRowPitch)) { stepChoice(kLoudRows[i].p, a); repaint(); return true; }
+        if (x >= 300 && x <= 368 && y >= 179 && y <= 194) {
+            juce::NativeMessageBox::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Forget the song's loudness?",
+                "Lacquer learns how loud the song is from every bar you play. Forget it when the mix has changed, then play the song through once.", this,
+                juce::ModalCallbackFunction::create([this](int r) { if (r == 1) proc_.forgetLoudness(); repaint(); }));
+            return true;
+        }
+        return false;
+    }
+    if (const int a = arrowAt(156)) { if (proc_.codecAvailable()) stepChoice(lq::oCodecRate, a); repaint(); return true; }
+    return false;
+}
+
+void LacquerEditor::detailDrag(juce::Point<float> pt, const juce::MouseEvent& e) {
+    if (dragBand_ < 0) return;
+    const auto o = sc(0, 0);
+    const float x = pt.x - o.x, y = pt.y - o.y;
+    const int b = dragBand_;
+    const auto& dh = lq::def(kBandHz[b]);
+    const float hz = juce::jlimit(dh.lo, dh.hi, float(eqF(juce::jlimit(8.0f, 372.0f, x))));
+    float db = float((kEqMid - y) / kEqPerDb);
+    if (e.mods.isShiftDown()) db = std::round(db * 2) / 2;
+    proc_.setShown(kBandHz[b], hz);
+    proc_.setShown(kBandDb[b], juce::jlimit(-6.0f, 6.0f, db));
+    repaint();
+}
+
+// ---- SECTIONS: the song's loudness bar by bar, the master over the mix
+void LacquerEditor::drawLane(juce::Graphics& g) {
+    const Ink ink{g, art_->legend, kFaceX - 2, kFaceY - 2};
+    const auto& bl = proc_.bars();
+    const double q = proc_.barLength(), end = proc_.songEndPpq();
+    const int nb = std::min(lq::kMaxBars, int(std::ceil(end / q)));
+    double lo = 1e9, hi = -1e9, sOut = 0, sMix = 0;
+    int n = 0;
+    for (int b = 0; b < nb; ++b) {
+        if (!bl.heard[b].load()) continue;
+        const double o = bl.out[b].load(), m = bl.mix[b].load();
+        if (o < -60) continue;
+        lo = std::min(lo, o); hi = std::max(hi, o);
+        sOut += o; sMix += m; ++n;
+    }
+    constexpr float y0 = 45, y1 = 67;
+    g.setColour(kText.withAlpha(0.05f)); g.fillRect(juce::Rectangle<float>(ink.p(8, y0), ink.p(372, y1)));
+    if (n < 2) {
+        ink.text("PLAY THE SONG: ITS LOUDNESS, BAR BY BAR, SHOWS HERE", 190, 60, 10.0f, 1, 0.5f);
+        return;
+    }
+    const double shift = (sOut - sMix) / n;   // the mix, lifted to sit with the master
+    for (int b = 0; b < nb; ++b) if (bl.heard[b].load() && bl.mix[b].load() > -60) { lo = std::min(lo, double(bl.mix[b].load()) + shift); hi = std::max(hi, double(bl.mix[b].load()) + shift); }
+    const double mid = (lo + hi) / 2, span = std::max(8.0, hi - lo + 2);
+    auto Y = [&](double lu) { return float(y1 - 2 - (y1 - y0 - 4) * ((lu - (mid - span / 2)) / span)); };
+    auto X = [&](int b) { return xOfPpq((b + 0.5) * q) - (kFaceX - 2); };
+    juce::Path pm, pmx;
+    bool startedM = false, startedX = false;
+    for (int b = 0; b < nb; ++b) {
+        if (!bl.heard[b].load() || bl.out[b].load() < -60) { startedM = startedX = false; continue; }
+        const auto a = ink.p(X(b), Y(bl.out[b].load()));
+        if (!startedM) { pm.startNewSubPath(a); startedM = true; } else pm.lineTo(a);
+        const auto c = ink.p(X(b), Y(bl.mix[b].load() + shift));
+        if (!startedX) { pmx.startNewSubPath(c); startedX = true; } else pmx.lineTo(c);
+    }
+    ink.dashed(pmx, 1.2f, 2.4f, 1.1f, kText.withAlpha(0.6f));
+    g.setColour(kGlow); g.strokePath(pm, juce::PathStrokeType(3.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.setColour(kCurve); g.strokePath(pm, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved));
+
+}
+
+// ---- BALANCE: the target's chips, top right
+namespace {
+constexpr float kChipY0 = 11, kChipY1 = 26;
+}
+int LacquerEditor::balanceChipAt(juce::Point<float> pt) const {
+    const auto o = sc(0, 0);
+    const float x = pt.x - o.x, y = pt.y - o.y;
+    if (y < kChipY0 - 2 || y > kChipY1 + 2) return -1;
+    const int t = juce::roundToInt(proc_.songValue(lq::aTarget));
+    if (t == 0) {
+        if (x >= 220 && x <= 236) return 0;     // previous style
+        if (x >= 352 && x <= 368) return 1;     // next style
+        if (x > 236 && x < 352) return 2;       // the style's menu
+    } else if (t == 1) {
+        if (x >= 220 && x <= 290) return 3;     // add references
+        if (x >= 296 && x <= 368 && proc_.numRefs() > 0) return 4;   // save as a style
+    }
+    return -1;
+}
+
+void LacquerEditor::chooseReferences() {
+    chooser_ = std::make_unique<juce::FileChooser>("Reference tracks", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.caf");
+    chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
+                          [this](const juce::FileChooser& fc) {
+                              juce::StringArray files;
+                              for (const auto& f : fc.getResults()) files.add(f.getFullPathName());
+                              if (!files.isEmpty()) { proc_.addReferences(files); proc_.setSong(lq::aTarget, 1.0f); }
+                              repaint();
+                          });
+}
+
+void LacquerEditor::askStyleName() {
+    auto* w = new juce::AlertWindow("Save the references as a style", "A name for it (it joins the genres under TARGET):", juce::MessageBoxIconType::NoIcon);
+    w->addTextEditor("name", "my references");
+    w->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    w->enterModalState(true, juce::ModalCallbackFunction::create([this, w](int r) {
+        if (r == 1) proc_.saveReferencesAsStyle(w->getTextEditorContents("name"));
+        repaint();
+    }), true);
+}
+
+// ---- a knob's value, written beside it while it turns
+void LacquerEditor::drawBubble(juce::Graphics& g) {
+    if (bubble_ < 0 || bubble_ >= kNumControls || clock_ > bubbleUntil_) return;
+    const auto& c = kControls[bubble_];
+    const int p = paramOf(bubble_);
+    if (p < 0 || (c.tray && !proc_.trayOpen)) return;
+    auto* prm = proc_.param(p);
+    const juce::String t = prm->getText(prm->convertTo0to1(value(bubble_)), 32);
+    const juce::Font f = font(13.0f);
+    const float w = juce::GlyphArrangement::getStringWidth(f, t) / s_ + 14, h = 19;
+    const float r0 = c.type == Knob ? kKnobRadius[c.kind] : 14.0f;
+    auto r = juce::Rectangle<float>(c.x - w / 2, cy(c) - r0 - h - 8, w, h);
+    if (r.getY() < 2) r.setY(cy(c) + r0 + 8);
+    g.setColour(juce::Colour(0xf01b1a17));
+    g.fillRoundedRectangle(r * s_, 4 * s_);
+    g.setColour(juce::Colour(0xfff1ead2));
+    g.setFont(f);
+    g.drawText(t, r * s_, juce::Justification::centred, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -982,7 +1400,9 @@ void LacquerEditor::paint(juce::Graphics& g) {
                 if ((c.tray && !proc_.trayOpen) || paramOf(i) < 0 || c.type == Meter) continue;
                 if (!proc_.shownIsOwn(paramOf(i))) continue;
                 const float rr = c.type == Knob ? kKnobRadius[c.kind] + 3.0f : 12.0f;
-                g.fillEllipse(juce::Rectangle<float>(c.x + rr * 0.72f - 2.6f, cy(c) - rr * 0.72f - 2.6f, 5.2f, 5.2f) * s_);
+                const auto dot = juce::Rectangle<float>(c.x + rr * 0.72f - 3.8f, cy(c) - rr * 0.72f - 3.8f, 7.6f, 7.6f) * s_;
+                g.setColour(juce::Colour(0xff2a2219)); g.fillEllipse(dot.expanded(1.2f * s_));
+                g.setColour(juce::Colour(0xffe2a04a)); g.fillEllipse(dot);
             }
         }
     }
@@ -991,6 +1411,7 @@ void LacquerEditor::paint(juce::Graphics& g) {
     drawReadout(g, kReadoutLufs, integ > -69 ? num1(integ) : juce::String("--.-"));
     drawReadout(g, kReadoutTp, tp > -100 ? num1(tp) : juce::String("--.-"));
     drawTapes(g);
+    drawBubble(g);
     if (clip.getBottom() > H + trayH()) drawHelp(g);
     seenRevision_ = proc_.revision.load();
 }
@@ -1114,6 +1535,7 @@ void LacquerEditor::drawTapes(juce::Graphics& g) {
 
 // The strip under the faceplate: what the control under the pointer does, in plain words.
 void LacquerEditor::drawHelp(juce::Graphics& g) {
+    if (!helpOn_) return;
     const auto strip = juce::Rectangle<float>(0, H + trayH(), W, kHelpH) * s_;
     g.setColour(juce::Colour(0xff1c1d1f));
     g.fillRect(strip);
@@ -1148,6 +1570,9 @@ void LacquerEditor::drawHelp(juce::Graphics& g) {
         if (id == "crt_bal") text << " With TARGET on GENRE, click the target's name to step through the styles; drop audio files on the screen to use them as references.";
     }
     const float pad = 24 * s_;
+    g.setColour(juce::Colour(0xff6f6a5c));
+    g.setFont(font(11.0f));
+    g.drawText("HIDE", juce::Rectangle<float>(strip.getRight() - 54 * s_, strip.getY() + 4 * s_, 46 * s_, 14 * s_), juce::Justification::centredRight, false);
     g.setColour(juce::Colour(0xfff1ead2));
     g.setFont(font(17.0f));
     g.drawText(name.toUpperCase(), juce::Rectangle<float>(pad, strip.getY() + 12 * s_, 190 * s_, 20 * s_), juce::Justification::centredLeft, false);
@@ -1181,6 +1606,13 @@ void LacquerEditor::tick(int frames) {
         }
     }
     if (proc_.lastNote.isNotEmpty()) { note_ = proc_.lastNote; proc_.lastNote.clear(); noteUntil_ = clock_ + 6.0; }
+    {   // the DETAIL page's gain-reduction traces
+        auto& m = proc_.meters();
+        glueHist_[histPos_] = m.glueGrMax.exchange(0.0f);
+        outPkHold_ = std::max(double(m.truePeak.load()), outPkHold_ - 0.35);
+        limHist_[histPos_] = m.limGrMax.exchange(0.0f);
+        histPos_ = (histPos_ + 1) % 240;
+    }
 }
 
 void LacquerEditor::timerCallback() {
@@ -1190,7 +1622,8 @@ void LacquerEditor::timerCallback() {
     if (meterP_ >= 0 && std::abs(needle_[1].pos - before[1]) > 2e-4) repaintPts(boundsOf(meterP_));
     if (proc_.revision.load() != seenRevision_) { repaint(); return; }
     // The screen moves while the song plays (sections, listening), and the readouts with it.
-    if (proc_.playing() || proc_.listening() || clock_ < noteUntil_ + 0.1) repaintPts({kFaceX - 2, kFaceY - 2, kFaceW + 4, kFaceH + 4});
+    if (proc_.playing() || proc_.listening() || proc_.page == 5 || clock_ < noteUntil_ + 0.1) repaintPts({kFaceX - 2, kFaceY - 2, kFaceW + 4, kFaceH + 4});
+    if (bubble_ >= 0 && clock_ > bubbleUntil_) { repaintPts(boundsOf(bubble_).expanded(40, 46)); bubble_ = -1; }
     repaintPts({kReadoutLufs[0] - kReadoutLufs[2] / 2, kReadoutLufs[1] - kReadoutLufs[3] / 2, kReadoutLufs[2], kReadoutLufs[3]});
     repaintPts({kReadoutTp[0] - kReadoutTp[2] / 2, kReadoutTp[1] - kReadoutTp[3] / 2, kReadoutTp[2], kReadoutTp[3]});
     bool keysChanged = false;
@@ -1221,7 +1654,7 @@ void LacquerEditor::mouseMove(const juce::MouseEvent& e) {
     else if (h >= 0) id = kControls[h].id;
     else if (proc_.trayOpen && pt.y > H && pt.x > 1000) id = "tray_table";
     else if (proc_.trayOpen && pt.y > H && pt.x < 150 && pt.y < H + 90) id = "tray_plate";
-    if (id != hoverId_) { hoverId_ = id; repaintPts({0, H + trayH(), W, kHelpH}); }
+    if (id != hoverId_) { hoverId_ = id; repaintPts({0, H + trayH(), W, helpH()}); }
     bool pointing = h == kLatch || h == kPresetTape || h == kSectTape || (h >= 0 && h < kNumControls && kControls[h].type == Button);
     if (h == kScreen) {
         bool edge = false;
@@ -1233,7 +1666,7 @@ void LacquerEditor::mouseMove(const juce::MouseEvent& e) {
 }
 
 void LacquerEditor::mouseExit(const juce::MouseEvent&) {
-    if (hoverId_.isNotEmpty()) { hoverId_.clear(); repaintPts({0, H + trayH(), W, kHelpH}); }
+    if (hoverId_.isNotEmpty()) { hoverId_.clear(); repaintPts({0, H + trayH(), W, helpH()}); }
 }
 
 void LacquerEditor::mouseDown(const juce::MouseEvent& e) {
@@ -1241,6 +1674,7 @@ void LacquerEditor::mouseDown(const juce::MouseEvent& e) {
     const int h = hit(pt);
     drag_ = kNone; dragMark_ = -1; dragMoved_ = false; dragParam_ = -1;
     if (h == kScreen) { screenClick(pt, e); return; }
+    if (helpOn_ && pt.y > H + trayH() && pt.y < H + trayH() + 20 && pt.x > W - 60) { proc_.setShowHelpStrip(false); setScale(s_); return; }
     if (h == kLatch) { setTray(!proc_.trayOpen); return; }
     if (h == kPresetTape) { showPresetMenu(); return; }
     if (h == kSectTape) {
@@ -1256,6 +1690,9 @@ void LacquerEditor::mouseDown(const juce::MouseEvent& e) {
         const int p = paramOf(h);
         if (p >= 0) {
             drag_ = h; dragParam_ = p; dragStartNorm_ = norm(h); dragAccum_ = 0; dragLast_ = e.position;
+            followDetail(p);
+            bubble_ = h; bubbleUntil_ = clock_ + 1.2;
+            repaintPts(boundsOf(h).expanded(40, 46));
             beginEdit(p);
         }
         return;
@@ -1266,6 +1703,7 @@ void LacquerEditor::mouseDown(const juce::MouseEvent& e) {
 
 void LacquerEditor::mouseDrag(const juce::MouseEvent& e) {
     const auto pt = e.position / s_;
+    if (drag_ == kScreen && dragBand_ >= 0) { detailDrag(pt, e); return; }
     if (drag_ == kScreen && dragMark_ >= 0) {
         proc_.moveMark(dragMark_, std::max(0.0, ppqAtX(pt.x)));
         // The mark keeps its place in the list unless it passes a neighbour; find it again by position.
@@ -1283,13 +1721,15 @@ void LacquerEditor::mouseDrag(const juce::MouseEvent& e) {
         dragAccum_ += d * (e.mods.isShiftDown() ? 0.15f : 1.0f);
         proc_.setShown(dragParam_, lq::fromNorm(dragParam_, juce::jlimit(0.0f, 1.0f, dragStartNorm_ + dragAccum_)));
         dragMoved_ = true;
-        repaintPts(boundsOf(drag_));
-        repaintPts({0, H + trayH(), W, kHelpH});
+        bubble_ = drag_; bubbleUntil_ = clock_ + 1.2;
+        repaintPts(boundsOf(drag_).expanded(40, 46));
+        repaintPts({0, H + trayH(), W, helpH()});
     }
 }
 
 void LacquerEditor::mouseUp(const juce::MouseEvent&) {
     if (drag_ >= 0 && drag_ < kNumControls) endEdit(dragParam_);
+    if (dragBand_ >= 0) { endEdit(kBandDb[dragBand_]); endEdit(kBandHz[dragBand_]); dragBand_ = -1; }
     drag_ = kNone; dragMark_ = -1; dragParam_ = -1;
     if (pressed_ >= 0) { const int was = pressed_; pressed_ = kNone; repaintPts(boundsOf(was)); }
     if (softDown_ >= 0) { softDown_ = -1; repaintPts({kFaceX, kFaceY, kFaceW, kFaceH}); }
@@ -1298,6 +1738,12 @@ void LacquerEditor::mouseUp(const juce::MouseEvent&) {
 void LacquerEditor::mouseDoubleClick(const juce::MouseEvent& e) {
     const auto pt = e.position / s_;
     const int h = hit(pt);
+    if (h == kScreen && proc_.page == 5 && proc_.detailTab == 0) {
+        const int b = toneBand_;
+        beginEdit(kBandDb[b]); proc_.resetShown(kBandDb[b]); endEdit(kBandDb[b]);
+        repaint();
+        return;
+    }
     if (h == kScreen && proc_.page == 4) {
         bool edge = false;
         const int b = blockAt(pt, edge);
@@ -1319,14 +1765,16 @@ void LacquerEditor::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseW
     const float d = wheel.deltaY * (wheel.isReversed ? -1.0f : 1.0f);
     if (h == kScreen && proc_.page == 2) {
         const int n = int(proc_.result().moves.size());
-        moveScroll_ = juce::jlimit(0, std::max(0, n - 6), moveScroll_ + (d < 0 ? 1 : -1));
+        moveScroll_ = juce::jlimit(0, std::max(0, n - movesShown()), moveScroll_ + (d < 0 ? 1 : -1));
         repaintPts({kFaceX, kFaceY, kFaceW, kFaceH});
         return;
     }
     if (h >= 0 && h < kNumControls && kControls[h].type == Knob && kControls[h].kind != kSel && paramOf(h) >= 0) {
         const int p = paramOf(h);
         proc_.setShown(p, lq::fromNorm(p, juce::jlimit(0.0f, 1.0f, norm(h) + d * (e.mods.isShiftDown() ? 0.03f : 0.2f))));
-        repaintPts(boundsOf(h));
+        followDetail(p);
+        bubble_ = h; bubbleUntil_ = clock_ + 1.2;
+        repaintPts(boundsOf(h).expanded(40, 46));
     }
 }
 

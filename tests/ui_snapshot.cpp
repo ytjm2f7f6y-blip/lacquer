@@ -4,6 +4,8 @@
 #include "PluginProcessor.h"
 #include "testsig.hpp"
 
+#include <cstring>
+
 using namespace lq;
 
 namespace {
@@ -87,6 +89,7 @@ void shot(const juce::String& file, const juce::MemoryBlock* session, const std:
     play(proc, head, le, 26, 5.0, false);   // a chorus, transport stopped: the meters move, the keys stay put
     if (help) le->showHelp(help);
     if (pick >= 0) le->pickBlock(pick);
+    if (help) for (int i = 0; i < layout::kNumControls; ++i) if (std::strcmp(layout::kControls[i].id, help) == 0 && layout::kControls[i].type == layout::Knob) le->showBubble(i);
     auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 2.0f);
     juce::File f(file);
     f.deleteFile();
@@ -121,6 +124,13 @@ int main(int argc, char** argv) {
         p.setShown(spIn, 1.0f);
     }, 1.0f, "sec_4", false, 3);
     shot(dir + "/ui_tray.png", &session, [](LacquerProcessor& p) { p.page = 4; p.setShown(spIn, 1.0f); p.setShown(spAmount, -14.0f); }, 1.0f, "sp_type", true);
+    shot(dir + "/ui_detail_tone.png", &session, [](LacquerProcessor& p) {
+        p.page = 5; p.detailTab = 0; p.setEditKey(0);
+        p.setSong(tMud, -2.5f); p.setSong(tMudHz, 280.0f); p.setSong(tAirPl, 2.0f); p.setSong(tAir, 3.0f);
+    }, 1.0f, "crt_detail");
+    shot(dir + "/ui_detail_dyn.png", &session, [](LacquerProcessor& p) { p.page = 5; p.detailTab = 1; p.setEditKey(0); p.setSong(dGlue, 7.0f); }, 1.0f, "d_glue");
+    shot(dir + "/ui_detail_loud.png", &session, [](LacquerProcessor& p) { p.page = 5; p.detailTab = 2; p.setEditKey(0); p.setSong(lTarget, -8.0f); }, 1.0f, "l_target");
+    shot(dir + "/ui_detail_out.png", &session, [](LacquerProcessor& p) { p.page = 5; p.detailTab = 3; p.setEditKey(0); }, 1.0f, "o_before");
     shot(dir + "/ui_empty.png", nullptr, nullptr, 1.0f);
     shot(dir + "/ui_75.png", &session, [](LacquerProcessor& p) { p.page = 2; p.takeAll(); }, 0.75f);
     return 0;

@@ -31,6 +31,12 @@ enum P {
     loudIn, lTarget, lCeiling, lClip, lGuard,
     // output
     oListen, oCodec, oDither, oMonitor, oMatch,
+    // the DETAIL page: tone's frequencies, its fourth band and where each band works; glue's
+    // timing; the limiter's style; BEFORE; the codec's bit rate
+    tMud, tLowHz, tMudHz, tPresHz, tAirHz, tLowPl, tMudPl, tPresPl, tAirPl, tPhase,
+    dAttack, dRelease, dRatio,
+    lStyle, lRelease,
+    oBefore, oCodecRate,
     kNumParams
 };
 
@@ -108,6 +114,24 @@ inline const ParamDef* paramTable() {
         {oDither, "o_dither", "dither", kChoice, 0, 2, 1, 3, "off|24|16", "", false, gStep},
         {oMonitor, "o_monitor", "monitor", kLin, -30, 0, 0, 0, nullptr, "dB", false, gLin},
         {oMatch, "o_match", "matched", kBool, 0, 1, 1, 0, nullptr, "", false, gStep},
+
+        {tMud, "t_mud", "mud", kLin, -6, 6, 0, 0, nullptr, "dB", true, gLin},
+        {tLowHz, "t_low_hz", "low freq", kLog, 40, 250, 110, 0, nullptr, "Hz", true, gLog},
+        {tMudHz, "t_mud_hz", "mud freq", kLog, 120, 800, 300, 0, nullptr, "Hz", true, gLog},
+        {tPresHz, "t_pres_hz", "presence freq", kLog, 1000, 6000, 2500, 0, nullptr, "Hz", true, gLog},
+        {tAirHz, "t_air_hz", "air freq", kLog, 5000, 18000, 10000, 0, nullptr, "Hz", true, gLog},
+        {tLowPl, "t_low_pl", "low on", kChoice, 0, 2, 0, 3, "stereo|mid|side", "", true, gBlend},
+        {tMudPl, "t_mud_pl", "mud on", kChoice, 0, 2, 0, 3, "stereo|mid|side", "", true, gBlend},
+        {tPresPl, "t_pres_pl", "presence on", kChoice, 0, 2, 0, 3, "stereo|mid|side", "", true, gBlend},
+        {tAirPl, "t_air_pl", "air on", kChoice, 0, 2, 0, 3, "stereo|mid|side", "", true, gBlend},
+        {tPhase, "t_phase", "tone phase", kChoice, 0, 1, 0, 2, "natural|linear", "", false, gStep},
+        {dAttack, "d_attack", "glue attack", kChoice, 0, 4, 3, 5, "1 ms|3 ms|10 ms|30 ms|80 ms", "", true, gStep},
+        {dRelease, "d_release", "glue release", kChoice, 0, 3, 0, 4, "auto|100 ms|300 ms|800 ms", "", true, gStep},
+        {dRatio, "d_ratio", "glue ratio", kChoice, 0, 3, 1, 4, "1.5 : 1|2 : 1|3 : 1|4 : 1", "", true, gStep},
+        {lStyle, "l_style", "limiter style", kChoice, 0, 2, 0, 3, "clean|punchy|dense", "", false, gStep},
+        {lRelease, "l_release", "limiter release", kChoice, 0, 3, 0, 4, "auto|fast|medium|slow", "", false, gStep},
+        {oBefore, "o_before", "before", kBool, 0, 1, 0, 0, nullptr, "", false, gStep},
+        {oCodecRate, "o_codec_rate", "codec rate", kChoice, 0, 1, 0, 2, "aac 256|aac 128", "", false, gStep},
     };
     return t;
 }
@@ -150,7 +174,7 @@ inline int findParam(const char* id) {
     return -1;
 }
 
-// The section keys: 0 = the song, 1..5 = the five sections.
+// The section keys: 0 = the song, 1..8 = the eight sections.
 constexpr int kNumKeys = 9;   // the song and eight section keys
 
 // Values of every parameter, in their own units.

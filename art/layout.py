@@ -133,10 +133,10 @@ CONTROLS.append({"id": "crt", "type": "crt", **CRT})
 # Four screen keys. The green one is the page on the tube (the mockup lights it on top of the photo).
 KEY_Y = 378
 SCREEN_KEYS = [("key_bal", "BALANCE"), ("key_loud", "LOUDNESS"), ("key_moves", "MOVES"), ("key_checks", "CHECKS"),
-               ("key_sect", "SECTIONS")]
-KEY_W, KEY_H, KEY_PITCH = 62, 22, 72.0
+               ("key_sect", "SECTIONS"), ("key_detail", "DETAIL")]
+KEY_W, KEY_H, KEY_PITCH = 57, 22, 63.0
 for i, (kid, text) in enumerate(SCREEN_KEYS):
-    button(kid, c + (i - 2) * KEY_PITCH, KEY_Y, text, w=KEY_W, h=KEY_H, set_=False, key=True, selected=False)
+    button(kid, c + (i - (len(SCREEN_KEYS) - 1) / 2) * KEY_PITCH, KEY_Y, text, w=KEY_W, h=KEY_H, set_=False, key=True, selected=False)
 KEYS_NAME_Y = 403
 
 ROW_A = 492
@@ -232,9 +232,10 @@ selector("o_listen", L_, 356, "LISTEN ON", ["DESK", "PHONE", "BUDS", "CAR", "CLU
 toggle("o_codec", R_, 348, "ON", "OFF", name="CODEC", set_="down")
 selector("o_dither", L_, 464, "DITHER", ["OFF", "24", "16"], spacing=40.0, set_=1)
 knob("o_monitor", "med", R_, 464, "MONITOR", labels([(0, "-30"), (1, "0")]), ticks=ticks_lin(-30, 0, 5), sub="dB", set_=0.72)
-button("o_match", L_ - 2, 566, "MATCHED", w=62, h=22, set_=True)
-button("o_blind", R_ - 22, 566, "BLIND", w=48, h=22)
-BYPASS_LABEL = {"x": (L_ - 2 + R_ - 22) / 2, "y": 590, "text": "COMPARE", "x0": L_ - 33, "x1": R_ + 2}
+button("o_before", 976, 566, "BEFORE", w=54, h=22)
+button("o_match", 1046, 566, "MATCHED", w=62, h=22, set_=True)
+button("o_blind", 1118, 566, "BLIND", w=48, h=22)
+BYPASS_LABEL = {"x": 1047, "y": 590, "text": "COMPARE", "x0": 946, "x1": 1146}
 lamp("power", 1150, 634, 7, "amber", set_=True)
 
 # ---- rails
@@ -294,7 +295,7 @@ LIT_GROUPS["asst"] = ["a_listen", "a_take"]
 LIT_GROUPS["ideas"] = [f"{c}_idea" for c in ("clean", "tone", "dyn", "col", "st", "loud")]
 LIT_GROUPS["ins"] = [f"{c}_in" for c in ("clean", "tone", "dyn", "col", "st", "loud")]
 LIT_GROUPS["meters"] = ["guarding", "over"]
-LIT_GROUPS["out"] = ["o_match", "o_blind"]
+LIT_GROUPS["out"] = ["o_before", "o_match", "o_blind"]
 LIT_GROUPS["power"] = ["power"]
 LIT_GROUPS["rail"] = ["space_on", "ab_a", "ab_b"]
 

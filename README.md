@@ -19,6 +19,7 @@ under the desk at a quarter turn of the latch.
 ![Lacquer, BALANCE screen](docs/plugin-balance.jpg)
 ![Lacquer, SECTIONS screen, editing the chorus](docs/plugin-sections.jpg)
 ![Lacquer, LOUDNESS screen, the verses with their own target](docs/plugin-loudness.jpg)
+![Lacquer, DETAIL screen, TONE's four bands](docs/plugin-detail-tone.jpg)
 ![The SPACE tray](docs/plugin-space-tray.jpg)
 
 ## Where the build is
@@ -28,10 +29,12 @@ under the desk at a quarter turn of the latch.
 | 1 | Engine: CLEAN, TONE, DYNAMICS, COLOUR, STEREO, LOUDNESS (learnt drive, true-peak limiter, clipper, GUARD), OUTPUT (LISTEN ON, dither, MONITOR, matched IN switches), SPACE | **done, tested** |
 | 2 | Sections: eight named keys, the song map, per-section settings (loudness TARGET included), glides, FOLLOW, editing the map on the screen (pick, retype, split, join, mark at the playhead) | **done, tested** |
 | 3 | Assistant: the listening pass, balance against a genre, your references or your own masters; moves, the loudness knee, section lift, checks, mix notes, LEARN | **done, tested** |
-| 4 | Faceplate art: bare panel, SPACE tray, lit patches, selector | **done at preview quality**; final-quality render to do |
-| 5 | The plugin (JUCE, Audio Unit): the five screen pages, sections, the tray, presets, A/B and BLIND, reference drop, hover help, window sizes | **first version done** |
-| 6 | CODEC (hear the master after streaming encoding) | to do: the switch moves but does nothing |
-| 7 | Mac build, auval and pluginval on every push | **running** |
+| 4 | TONE as a four-band mastering EQ (low, mud, presence, air) with set frequencies, mid/side per band and linear phase; GLUE's attack, release and ratio; the limiter's style and release | **done, tested** |
+| 5 | BEFORE (the mix, lined up and loudness-matched), gain-reduction traces, an input meter, the song's loudness bar by bar | **done, tested** |
+| 6 | CODEC: the master through Apple's AAC encoder and back, with the true peak after encoding | **done** (Mac only; tested in the Mac build) |
+| 7 | Faceplate art: bare panel, SPACE tray, lit patches, selector | **done at preview quality**; final-quality render to do |
+| 8 | The plugin (JUCE, Audio Unit): six screen pages, sections, the tray, presets, A/B and BLIND, references (dropped or chosen) and styles made from them, hover help that folds away, a value beside a turning knob, window sizes | **done** |
+| 9 | Mac build, auval and pluginval on every push | **running** |
 
 ## Installing
 
@@ -45,11 +48,27 @@ Then, on the stereo output: Audio FX > Audio Units > Rumpus Room Records > Lacqu
 ## How it works, briefly
 
 **LOUDNESS** works out its own drive: the target less the loudness the limiter's input
-measured. The first time the song plays it learns that measurement, and from then on
-the drive is fixed while the song plays (so the song keeps its own rises and falls)
-and is recalibrated only when it stops. GUARD reads the listening pass's peak
-statistics to find the loudness where the limiter starts eating transients (the knee)
-and won't drive past it. The limiter is true-peak, after an optional soft clipper.
+measured. It learns that from the song bar by bar: every bar you play is filed, each
+bar once, so a loop of the chorus can't pass for the whole song, and the DETAIL screen
+says how much of the song the figure rests on. The drive is fixed while the song plays
+(so the song keeps its own rises and falls) and moves only when it stops. GUARD finds
+the loudness where the limiter starts eating transients (the knee) from the peaks at
+the limiter's own input, after PUNCH and the rest, and won't drive past it. The limiter
+is true-peak, after an optional soft clipper, in three styles: CLEAN, PUNCHY, DENSE.
+
+**TONE** has four bands: a low shelf (40-250 Hz), a mud bell (120-800 Hz), a presence
+bell (1-6 kHz) and an air shelf (5-18 kHz). The faceplate's knobs set three gains; the
+DETAIL screen has all four, their frequencies, and puts each on the stereo, the mid or
+the side. In natural phase it adds no delay and can work dynamically; in linear phase
+it is one symmetric FIR on the mid and one on the side (48 ms of delay at 44.1/48 kHz),
+rebuilt off the audio thread and crossfaded in as the settings move.
+
+**BEFORE** plays the mix as it came in, delayed to line up with the master and turned
+to the master's loudness, so you compare the sound and not the level. **CODEC** (Mac)
+runs the master through Apple's AAC encoder and back on a worker thread, at 256 or 128
+kbps, and shows the true peak after encoding. Both are for listening only: neither
+reaches a bounce, and the codec's own few thousand samples of delay aren't reported to
+the host.
 
 **The listening pass** feeds the input, before any processing, to a 4096-point
 analyser in sixth-octave bands (mid and side), a BS.1770 loudness meter, a peak
@@ -75,7 +94,7 @@ than 2 dB off the loudest section, a little less GLUE there to keep its punch). 
 LOUDNESS screen shows how far the loudest section stands over the others, in the mix
 and as it will come out with the targets as they are.
 
-From `tests/engine_tests.cpp` (26 checks) on the Linux build machine: loudness lands
+From `tests/engine_tests.cpp` (39 checks) on the Linux build machine: loudness lands
 within 0.2 dB of the target after one pass, true peak stays under the ceiling, the
 sound is the same at any host block size, a bounce leaves out MONITOR and LISTEN ON,
 and everything on costs 23% of one core at 48 kHz. Latency is 903 samples (19 ms) at

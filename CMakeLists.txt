@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Lacquer VERSION 0.2.0 LANGUAGES C CXX)
+project(Lacquer VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -68,7 +68,7 @@ if(LQ_BUILD_PLUGIN)
         plugin/fonts/BarlowSemiCondensed-SemiBold.ttf)
     set_target_properties(LacquerData PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
 
-    set(LQ_PLUGIN_SOURCES plugin/PluginProcessor.cpp plugin/PluginEditor.cpp)
+    set(LQ_PLUGIN_SOURCES plugin/PluginProcessor.cpp plugin/PluginEditor.cpp plugin/Codec.cpp)
     set(LQ_DEFINES JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
 
     target_sources(Lacquer PRIVATE ${LQ_PLUGIN_SOURCES})

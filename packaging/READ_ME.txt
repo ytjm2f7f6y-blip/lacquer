@@ -45,6 +45,18 @@ Sections:
   what it is, SPLIT halves it, JOIN folds it into the one before,
   + MARK AT PLAYHEAD adds one. Drag a block's left edge to move it.
 
+DETAIL (screen key): what the knobs don't reach, for the module you
+last touched. TONE: four bands; drag a handle (across: frequency; up
+and down: gain); the arrows put a band on the mid or the side, and
+PHASE switches to linear. DYNAMICS: glue's attack, release, ratio.
+LOUDNESS: the limiter's style and release, gain reduction, and how
+much of the song the loudness was learnt from (FORGET after a new
+mix). OUTPUT: the input meter, the codec and its bit rate.
+
+BEFORE (under the meters): the mix as it came in, at the master's
+loudness. CODEC: the master through Apple's AAC encoder and back.
+Neither is ever printed into a bounce.
+
 The SPACE tray: give the latch at the bottom left a quarter turn.
 
 Knobs: drag up or right, Shift for fine, double-click to reset.
@@ -55,5 +67,5 @@ Click the INTEGRATED readout to start its count again.
 Point at any control and the strip under the faceplate says what it
 does.
 
-Not working yet in this build: CODEC (the switch moves but does
-nothing).
+SET > Show the help strip hides the strip under the faceplate (or
+click HIDE on it).

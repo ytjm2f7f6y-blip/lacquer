@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 
+#include "Codec.h"
 #include "lq_assistant.hpp"
 #include "lq_engine.hpp"
 
@@ -104,6 +105,12 @@ public:
     const lq::Target& target() const { return target_; }
     int genre() const { return genre_; }
     void setGenre(int g);
+    // Styles: the built-in genres, then ones you made from references.
+    int numStyles() const;
+    juce::String styleName(int i) const;
+    bool styleIsYours(int i) const;
+    void saveReferencesAsStyle(const juce::String& name);
+    void removeStyle(int i);
     int numRefs() const { return int(refCurves_.size()); }
     int numMine() const { return int(mineCurves_.size()); }
     void addReferences(const juce::StringArray& files);   // analysed off the audio thread
@@ -141,10 +148,24 @@ public:
     double sampleRate() const { return sampleRate_; }
     void resetIntegrated() { resetPass_.store(true); }
     bool loudnessKnown() const { return engine_.measuredKnown(); }
+    double coverage() const { return coverage_.load(); }   // how much of the song the loudness rests on (-1: unknown)
+    int songBars() const;
+    const lq::BarLevels& bars() const { return engine_.bars(); }
+    void forgetLoudness();                            // a new mix: learn it from scratch
+    int latencyNow() const { return engine_.latencyFor(songValue(lq::tPhase) >= 0.5f); }
+
+    // ---- the codec preview
+    bool codecAvailable() const { return codec_.available(); }
+    juce::String codecWhy() const { return juce::String(codec_.why()); }
+    float codecPeak() const { return codec_.peakDb(); }
+    Codec& codec() { return codec_; }
 
     // ---- the window
     float uiScale = 1.0f;
-    int page = 0;                                     // 0 balance, 1 loudness, 2 moves, 3 checks, 4 sections
+    int page = 0;                                     // 0 balance, 1 loudness, 2 moves, 3 checks, 4 sections, 5 detail
+    int detailTab = 0;                                // the DETAIL page: 0 tone, 1 dynamics, 2 loudness, 3 output
+    bool showHelpStrip() const;                       // a setting for every session (the strip under the faceplate)
+    void setShowHelpStrip(bool on);
     bool trayOpen = false;
     std::atomic<int> revision{0};                     // bumps when anything the window shows changes
 
@@ -157,6 +178,7 @@ private:
     void finishPass();
     void runAssistant();
     void rebuildTarget();
+    lq::Target styleTarget(int i) const;
     void loadTaste();
     void saveTaste() const;
     juce::ValueTree snapshot() const;                 // song settings and sections' own values (A/B, presets)
@@ -194,6 +216,11 @@ private:
     lq::Taste taste_;
     int genre_ = 0;
     std::vector<std::vector<double>> refCurves_, mineCurves_;
+    struct UserStyle { juce::String name; std::vector<std::vector<double>> curves; };
+    std::vector<UserStyle> userStyles_;
+    Codec codec_;
+    std::atomic<double> coverage_{-1};
+    bool sawPpq_ = false, lastPhase_ = false;
     std::atomic<int> refJobs_{0};
     juce::ThreadPool pool_{1};
 

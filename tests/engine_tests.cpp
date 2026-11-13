@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -66,6 +67,28 @@ double lufs(const std::vector<float>& L, const std::vector<float>& R, size_t fro
 bool finite(const Run& r) {
     for (size_t i = 0; i < r.L.size(); ++i) if (!std::isfinite(r.L[i]) || !std::isfinite(r.R[i])) return false;
     return true;
+}
+
+// Everything out but what's being tested.
+lq::Values bare() {
+    using namespace lq;
+    Values w;
+    for (int p : {cleanIn, toneIn, dynIn, colIn, stIn, spIn, loudIn}) w[p] = 0.0f;
+    w[oDither] = 0.0f;
+    return w;
+}
+
+// The level (dB) of a sine through an engine, on the mid (L = R) or the side (L = -R), once settled.
+double sineGain(lq::Engine& e, const lq::Values& v, double f, bool side, double secs = 1.0) {
+    const int n = int(secs * kFs);
+    std::vector<float> L(static_cast<size_t>(n)), R(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) { const float x = float(0.1 * std::sin(2 * 3.14159265358979 * f * i / kFs)); L[size_t(i)] = x; R[size_t(i)] = side ? -x : x; }
+    lq::Transport t;
+    for (int i = 0; i < n; i += 512) e.process(L.data() + i, R.data() + i, std::min(512, n - i), v, t);
+    double a = 0;
+    const int from = n / 2;
+    for (int i = from; i < n; ++i) a += double(L[size_t(i)]) * L[size_t(i)] + double(R[size_t(i)]) * R[size_t(i)];
+    return 10 * std::log10(a / (n - from) / (0.01)) ;
 }
 
 std::unique_ptr<lq::Engine> engine() {
@@ -212,6 +235,156 @@ int main() {
             worst = std::max(worst, m);
         }
         check(finite(rb) && worst <= lq::dbToGain(w[lCeiling] + 0.2), "and the change between sections stays under the ceiling");
+    }
+
+    // ---- TONE: four bands at their own frequencies, each on the stereo, the mid or the side
+    {
+        Values w = bare();
+        w[toneIn] = 1.0f; w[tMode] = 0.0f;
+        w[tLow] = 0; w[tPres] = 0; w[tAir] = 0;
+        w[tMud] = -4.0f; w[tMudHz] = 300.0f;
+        auto e = engine();
+        const double at300 = sineGain(*e, w, 300, false), at3k = sineGain(*e, w, 3000, false);
+        check(std::abs(at300 + 4.0) < 0.15 && std::abs(at3k) < 0.4, "MUD cuts at its own frequency and leaves the top alone", num(at300, 2) + " dB at 300 Hz, " + num(at3k, 2) + " dB at 3 kHz");
+        w[tMud] = 0.0f; w[tAir] = 6.0f; w[tAirHz] = 8000.0f; w[tAirPl] = 2.0f;   // air on the side only
+        auto e2 = engine(), e3 = engine();
+        const double mid = sineGain(*e2, w, 14000, false), side = sineGain(*e3, w, 14000, true);
+        check(std::abs(mid) < 0.05 && side > 4.0, "AIR on the side lifts the side and leaves the mid alone", "mid " + num(mid, 2) + " dB, side " + num(side, 2) + " dB");
+        // Linear phase: the same response, a fixed delay.
+        Values lw = w;
+        lw[tMud] = -4.0f; lw[tAirPl] = 0.0f; lw[tPhase] = 1.0f;
+        Values nw = lw; nw[tPhase] = 0.0f;
+        bool same = true;
+        std::string worst;
+        for (double f : {60.0, 300.0, 1000.0, 3000.0, 12000.0}) {
+            auto a = engine(), b = engine();
+            const double gl = sineGain(*a, lw, f, false, 1.5), gn = sineGain(*b, nw, f, false, 1.5);
+            if (std::abs(gl - gn) > 0.3) { same = false; worst += num(f, 0) + " Hz: " + num(gl, 2) + " vs " + num(gn, 2) + "; "; }
+        }
+        auto a = engine();
+        check(same, "linear phase draws the same curve as natural phase", worst);
+        check(a->latencyFor(true) - a->latencyFor(false) > 1000 && a->latencyFor(true) - a->latencyFor(false) < int(0.06 * kFs),
+              "and costs a fixed delay", std::to_string(a->latencyFor(true) - a->latencyFor(false)) + " samples more");
+        // TONE's impulse in linear phase is symmetric: nothing smeared ahead of or behind anything else.
+        {
+            lq::LinearTone lt;
+            lt.prepare(kFs);
+            const ToneParams tp = Engine::toneParamsFrom(lw);
+            float wl[32] = {}, wr[32] = {};
+            for (int k = 0; k < 400; ++k) { lt.process(wl, wr, 32, tp); std::this_thread::sleep_for(std::chrono::microseconds(500)); }
+            const int n = 16384;
+            std::vector<float> L(static_cast<size_t>(n), 0.0f), R(static_cast<size_t>(n), 0.0f);
+            L[100] = R[100] = 0.5f;
+            for (int i = 0; i < n; i += 32) lt.process(L.data() + i, R.data() + i, 32, tp);
+            int pk = 0;
+            for (int i = 0; i < n; ++i) if (std::abs(L[size_t(i)]) > std::abs(L[size_t(pk)])) pk = i;
+            double asym = 0, tot = 0;
+            for (int k = 1; k < 1500 && pk - k >= 0 && pk + k < n; ++k) { asym += std::abs(L[size_t(pk - k)] - L[size_t(pk + k)]); tot += std::abs(L[size_t(pk + k)]); }
+            check(pk - 100 == lt.latency() && tot > 0 && asym / tot < 0.02, "and its impulse is symmetric round the delay (linear phase)",
+                  "peak at +" + std::to_string(pk - 100) + " samples, asymmetry " + num(asym / std::max(tot, 1e-12), 4));
+        }
+    }
+
+    // ---- GLUE's attack: a fast one takes the front off the hits
+    {
+        Values w = bare();
+        w[dynIn] = 1.0f; w[dGlue] = 8.0f; w[dPunch] = 0.0f; w[dEven] = 0.0f;
+        auto crest = [&](int attack) {
+            auto e = engine();
+            Values x = w; x[dAttack] = float(attack);
+            const Run r = run(*e, s, x, 512);
+            double pk = 0, ms = 0;
+            for (size_t i = size_t(4 * kFs); i < r.L.size(); ++i) { pk = std::max(pk, double(std::abs(r.L[i]))); ms += double(r.L[i]) * r.L[i]; }
+            return lq::gainToDb(pk) - 10 * std::log10(ms / double(r.L.size() - size_t(4 * kFs)));
+        };
+        const double fast = crest(0), slow = crest(4);
+        check(fast < slow - 0.5, "GLUE with a 1 ms attack takes more off the hits than with 80 ms", "crest " + num(fast, 1) + " vs " + num(slow, 1) + " dB");
+    }
+
+    // ---- the limiter's styles: all under the ceiling; DENSE gets more loudness from the same drive
+    {
+        double loud[3] = {};
+        bool under = true;
+        for (int st = 0; st < 3; ++st) {
+            auto e = engine();
+            Values w = v;
+            w[lStyle] = float(st); w[lGuard] = 0.0f; w[lTarget] = -7.0f;
+            e->setMeasuredInput(lufs(s.L, s.R), true);
+            const Run r = run(*e, s, w, 512);
+            loud[st] = lufs(r.L, r.R, size_t(2 * kFs));
+            double tp = -200;
+            lp::TruePeak tpm[2];
+            for (size_t i = 0; i < r.L.size(); ++i) tp = std::max({tp, lq::gainToDb(tpm[0].process(r.L[i])), lq::gainToDb(tpm[1].process(r.R[i]))});
+            under = under && tp <= w[lCeiling] + 0.15;
+        }
+        check(under, "every limiter style keeps the true peak under the ceiling");
+        check(loud[2] > loud[0] + 0.2, "DENSE makes more of the same drive than CLEAN", "clean " + num(loud[0], 2) + ", punchy " + num(loud[1], 2) + ", dense " + num(loud[2], 2) + " LUFS");
+    }
+
+    // ---- BEFORE: the song as it came in, lined up and as loud as the master
+    {
+        auto a = engine(), b = engine();
+        Values w = v, bw = v;
+        bw[oBefore] = 1.0f;
+        a->setMeasuredInput(lufs(s.L, s.R), true);
+        b->setMeasuredInput(lufs(s.L, s.R), true);
+        const Run ra = run(*a, s, w, 512), rb = run(*b, s, bw, 512);
+        const double la = lufs(ra.L, ra.R, size_t(8 * kFs)), lb = lufs(rb.L, rb.R, size_t(8 * kFs));
+        // Lined up: the output is the input delayed by the latency, times one gain.
+        const size_t lat = size_t(b->latency());
+        double xy = 0, xx = 0, yy = 0;
+        for (size_t i = size_t(10 * kFs); i < size_t(20 * kFs); ++i) { const double x = s.L[i - lat], y = rb.L[i]; xy += x * y; xx += x * x; yy += y * y; }
+        const double corr = xy / std::sqrt(xx * yy + 1e-30);
+        check(std::abs(la - lb) < 1.0 && corr > 0.99, "BEFORE plays the mix in time with the master, at the master's loudness",
+              "master " + num(la, 1) + ", before " + num(lb, 1) + " LUFS, correlation " + num(corr, 4));
+        auto c = engine();
+        c->setMeasuredInput(lufs(s.L, s.R), true);
+        const Run rc = run(*c, s, bw, 512, true), rd = ra;
+        double d = 0;
+        for (size_t i = 0; i < rc.L.size(); ++i) d = std::max(d, double(std::abs(rc.L[i] - rd.L[i])));
+        check(d < 1e-5, "and never reaches a bounce");
+    }
+
+    // ---- the bar map: each bar counts once, so a loop of the chorus can't pass for the song
+    {
+        auto e = engine();
+        Values w = v;
+        w[lGuard] = 0.0f;
+        auto play = [&](size_t from, size_t to) {
+            lq::Transport t;
+            t.playing = true; t.hasPpq = true; t.bpm = s.bpm;
+            std::vector<float> L(s.L.begin() + long(from), s.L.begin() + long(to)), R(s.R.begin() + long(from), s.R.begin() + long(to));
+            for (size_t i = 0; i < L.size(); i += 512) {
+                const int n = int(std::min<size_t>(512, L.size() - i));
+                t.ppq = double(from + i) / kFs * s.bpm / 60.0;
+                e->process(L.data() + i, R.data() + i, n, w, t);
+            }
+            lq::Transport stop;
+            float z[64] = {}, z2[64] = {};
+            e->process(z, z2, 64, w, stop);
+        };
+        play(0, s.L.size());
+        double whole = 0, cov = 0;
+        const bool ok1 = lq::loudnessFromBars(e->bars(), 18, whole, cov);
+        const double byPass = e->calibratedInput();
+        e->setMeasuredInput(whole, true);
+        play(size_t(12 * kFs), size_t(20 * kFs));   // the first chorus, again
+        play(size_t(12 * kFs), size_t(20 * kFs));
+        double after = 0, cov2 = 0;
+        lq::loudnessFromBars(e->bars(), 18, after, cov2);
+        e->clearPass();
+        play(size_t(12 * kFs), size_t(20 * kFs));
+        const double loopOnly = e->calibratedInput();
+        check(ok1 && cov > 0.9 && std::abs(whole - byPass) < 1.0, "the bar map learns the song's loudness from a full play",
+              num(whole, 2) + " LUFS (a pass says " + num(byPass, 2) + "), " + num(cov * 100, 0) + "% of the song");
+        check(std::abs(after - whole) < 0.3 && std::abs(loopOnly - whole) > 0.5, "looping the chorus doesn't move it",
+              "after the loop " + num(after, 2) + " LUFS; the loop alone would say " + num(loopOnly, 2));
+        auto f = engine();
+        std::swap(e, f);
+        play(size_t(12 * kFs), size_t(20 * kFs));
+        double part = 0, cov3 = 0;
+        lq::loudnessFromBars(e->bars(), 18, part, cov3);
+        check(cov3 > 0.15 && cov3 < 0.35, "a loop on its own says how little of the song it is", num(cov3 * 100, 0) + "% of the song heard");
     }
 
     // ---- the hidden space

@@ -78,11 +78,18 @@ inline Target averageTarget(const std::vector<std::vector<double>>& curves, cons
 // ---------------------------------------------------------------------------
 // How the master's controls bend a curve (a static picture, for the balance screen and the moves).
 inline double toneResponse(double f, const Values& v) {
-    auto shelfLo = [&](double fc, double g) { const double gl = dbToGain(g); const double r = 1.0 / (1.0 + (f / fc) * (f / fc)); return gainToDb(1.0 + (gl - 1.0) * std::sqrt(r)); };
-    auto shelfHi = [&](double fc, double g) { const double gl = dbToGain(g); const double r = 1.0 / (1.0 + (fc / f) * (fc / f)); return gainToDb(1.0 + (gl - 1.0) * std::sqrt(r)); };
     auto bell = [&](double fc, double g, double oct) { return g * std::exp(-std::pow(std::log2(f / fc) / oct, 2)); };
     double d = 0;
-    if (v[toneIn] > 0.5f) d += shelfLo(110, v[tLow]) + bell(2500, v[tPres], 1.1) + shelfHi(10000, v[tAir]);
+    if (v[toneIn] > 0.5f) {
+        // TONE's own response, mid and side together (as the balance curve is).
+        ToneParams tp;
+        const int db[kToneBands] = {tLow, tMud, tPres, tAir}, hz[kToneBands] = {tLowHz, tMudHz, tPresHz, tAirHz}, pl[kToneBands] = {tLowPl, tMudPl, tPresPl, tAirPl};
+        for (int b = 0; b < kToneBands; ++b) { tp.b[b].db = v[db[b]]; tp.b[b].hz = v[hz[b]]; tp.b[b].place = v[pl[b]]; }
+        tp.weight = 1;
+        std::complex<double> hm, hs;
+        toneResponseMS(tp, f, 48000.0, hm, hs);
+        d += 10 * std::log10(0.75 * std::norm(hm) + 0.25 * std::norm(hs) + 1e-12);   // the mid carries most of a mix
+    }
     if (v[cleanIn] > 0.5f) {
         d += bell(3400, -0.35 * v[cHarsh], 0.7);
         if (v[cRumble] > 1) { const double r = f / v[cRumble]; d += 10 * std::log10(r * r * r * r / (1 + r * r * r * r)); }
@@ -105,7 +112,7 @@ struct Move {
     bool beforeOwn = false, beforeExtraOwn = false;   // the section had its own value before (else it followed the song)
     int kind = 0;           // for LEARN: which kind of move
 };
-enum MoveKind { mkLow, mkPres, mkAir, mkHarsh, mkRumble, mkMono, mkWidth, mkLoud, mkGlue, mkRes, mkLift, kNumMoveKinds };
+enum MoveKind { mkLow, mkPres, mkAir, mkHarsh, mkRumble, mkMono, mkWidth, mkLoud, mkGlue, mkRes, mkLift, mkMud, kNumMoveKinds };
 
 struct Taste {   // how often each kind of move was taken and skipped
     float taken[kNumMoveKinds]{}, skipped[kNumMoveKinds]{};
@@ -203,7 +210,9 @@ inline Knee kneeFrom(const KeyStats& song, double ceilingDb, double clip) {
     return k;
 }
 
-inline int destinationLufs(int dest) { static const int d[4] = {-10, -9, -12, -8}; return d[std::max(0, std::min(dest, 3))]; }
+// What each destination usually asks for. Streaming services turn anything louder than about -14
+// down, so STREAM aims only a little over that; a CD and a club want it loud; a cut wants room.
+inline int destinationLufs(int dest) { static const int d[4] = {-12, -9, -13, -8}; return d[std::max(0, std::min(dest, 3))]; }
 
 struct Result {
     bool any = false;
@@ -257,9 +266,10 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
     };
     auto add = [&](Move m) { r.moves.push_back(std::move(m)); };
 
-    // TONE: low, presence, air. Moves are capped; more than that belongs in the mix.
+    // TONE: low, mud, presence, air. Moves are capped; more than that belongs in the mix.
     struct ToneBand { int param; int kind; double f0, f1; const char* name; const char* hi; const char* lo; };
-    const ToneBand tb[3] = {{tLow, mkLow, 45, 160, "LOW", "The low end sits heavy against the target.", "The low end sits light against the target."},
+    const ToneBand tb[4] = {{tLow, mkLow, 45, 160, "LOW", "The low end sits heavy against the target.", "The low end sits light against the target."},
+                            {tMud, mkMud, 200, 500, "MUD", "200 to 500 Hz builds up: the mix sounds thick and boxy.", "200 to 500 Hz sits thin: the body is missing."},
                             {tPres, mkPres, 1600, 4000, "PRESENCE", "2 to 4 kHz is a touch forward.", "The upper mids sit back."},
                             {tAir, mkAir, 8000, 16000, "AIR", "The top end sits above the target.", "The top end sits under the target."}};
     for (const auto& b : tb) {
@@ -272,7 +282,7 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
             m.why = dev > 0 ? b.hi : b.lo;
             m.conf = confFor(dev, room, b.kind);
             add(m);
-            if (std::abs(dev) > 4.5) r.mixNotes.push_back(std::string(b.name == std::string("LOW") ? "The low end" : b.name == std::string("AIR") ? "The top end" : "The upper mids") +
+            if (std::abs(dev) > 4.5) r.mixNotes.push_back(std::string(b.name == std::string("LOW") ? "The low end" : b.name == std::string("AIR") ? "The top end" : b.name == std::string("MUD") ? "The low-mids" : "The upper mids") +
                                                           " is " + fmt1(std::abs(dev)) + " dB " + (dev > 0 ? "over" : "under") + " the target. Fix the bulk of it in the mix.");
         }
         // A section that stands apart from the song gets its own move: the two that stand out most
@@ -395,7 +405,8 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
     }
 
     // LOUDNESS: as loud as the destination asks, but not past the knee.
-    r.knee = kneeFrom(all, song[lCeiling], song[lClip]);
+    // The knee from the limiter's own input when the pass has it (so PUNCH, GLUE and COLOUR count).
+    r.knee = kneeFrom(st.limIn[0].windows >= 50 ? st.limIn[0] : all, song[lCeiling], song[lClip]);
     if (r.knee.known) {
         const double want = std::min(double(destinationLufs(int(song[aDest]))), r.knee.kneeLufs - 0.2);
         const double t = std::round(clamp(want, -16.0, -6.0) * 10) / 10;

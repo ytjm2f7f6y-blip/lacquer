@@ -6,6 +6,7 @@
 #include "lp_modules.hpp"
 
 #include <array>
+#include <complex>
 
 namespace lq {
 
@@ -140,71 +141,125 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// TONE: low shelf, presence bell, air shelf. In dynamic mode each one works only as hard as the
-// music needs it: a boost backs off while its band runs hot, a cut leans in.
-struct ToneParams { float lowDb = 0, presDb = 0, airDb = 0, dynamic = 0, weight = 0; };
+// TONE: four bands (a low shelf, a mud bell, a presence bell, an air shelf), each at its own
+// frequency and each working on the stereo signal, the mid or the side. In dynamic mode each one
+// works only as hard as the music needs it: a boost backs off while its band runs hot, a cut leans in.
+// Every band is dry + (g - 1) * filter, so its gain can move every sample without touching the filter.
+constexpr int kToneBands = 4;
+struct ToneBand { float db = 0, hz = 1000, place = 0; };   // place 0 stereo, 1 mid, 2 side (in between while gliding)
+struct ToneParams { ToneBand b[kToneBands]; float dynamic = 0, weight = 0; };
+
+inline double toneQ(int band) { return band == 1 ? 1.0 : 0.7; }
+// How much of a band reaches the mid and the side, from its placement.
+inline double placeMid(double p) { return p <= 1 ? 1.0 : clamp(2.0 - p, 0.0, 1.0); }
+inline double placeSide(double p) { return p <= 1 ? clamp(1.0 - p, 0.0, 1.0) : clamp(p - 1.0, 0.0, 1.0); }
+
+// The filter a band adds in (F in dry + (g - 1) * F), as a response at frequency f.
+inline std::complex<double> toneFilterAt(int band, double hz, double f, double fs) {
+    const std::complex<double> z1 = std::polar(1.0, -2 * kPi * f / fs);   // z^-1
+    if (band == 0 || band == 3) {
+        const double k = std::tan(kPi * clamp(hz, 5.0, fs * 0.45) / fs);
+        if (band == 0) { const double b0 = k / (1 + k), a1 = (k - 1) / (k + 1); return b0 * (1.0 + z1) / (1.0 + a1 * z1); }
+        const double b0 = 1 / (1 + k), a1 = (k - 1) / (k + 1);
+        return b0 * (1.0 - z1) / (1.0 + a1 * z1);
+    }
+    const double w = 2 * kPi * clamp(hz, 10.0, fs * 0.45) / fs, al = std::sin(w) / (2 * toneQ(band)), c = std::cos(w);
+    return (al - al * z1 * z1) / ((1 + al) - 2 * c * z1 + (1 - al) * z1 * z1);
+}
+// The whole of TONE (static, as set) on the mid and the side at frequency f.
+inline void toneResponseMS(const ToneParams& p, double f, double fs, std::complex<double>& hm, std::complex<double>& hs) {
+    hm = hs = 1.0;
+    for (int b = 0; b < kToneBands; ++b) {
+        const double g = dbToGain(p.b[b].db) - 1.0;
+        const std::complex<double> F = toneFilterAt(b, p.b[b].hz, f, fs);
+        hm *= 1.0 + placeMid(p.b[b].place) * g * F;
+        hs *= 1.0 + placeSide(p.b[b].place) * g * F;
+    }
+    hm = 1.0 + double(p.weight) * (hm - 1.0);
+    hs = 1.0 + double(p.weight) * (hs - 1.0);
+}
 
 class Tone {
 public:
     void prepare(double fs) {
         fs_ = fs;
-        for (int c = 0; c < 2; ++c) { low_[c].lowpass(110, fs); air_[c].highpass(10000, fs); bandpass0(pres_[c], 2500, 0.7, fs); }
-        dLow_.lowpass(110, fs); dAir_.highpass(10000, fs); bandpass0(dPres_, 2500, 0.7, fs);
+        for (auto& f : hz_) f = -1;
         for (auto& e : fast_) e.set(0.03, 0.3, fs);
         for (auto& e : slow_) e.set(4.0, 4.0, fs);
         k_ = tcCoef(0.08, fs);
         reset();
     }
     void reset() {
-        for (int c = 0; c < 2; ++c) { low_[c].reset(); air_[c].reset(); pres_[c].reset(); }
-        dLow_.reset(); dAir_.reset(); dPres_.reset();
+        for (int b = 0; b < kToneBands; ++b) { for (int c = 0; c < 2; ++c) { fo_[b][c].reset(); bq_[b][c].reset(); } dFo_[b].reset(); dBq_[b].reset(); }
         for (auto& e : fast_) e.reset();
         for (auto& e : slow_) e.reset();
         for (auto& f : fac_) f = 1;
         for (auto& r : gR_) r.reset();
+        for (auto& r : mR_) r.reset();
+        for (auto& r : sR_) r.reset();
         wR_.reset();
     }
     void process(float* L, float* R, int n, const ToneParams& p) {
-        float w[kSub], gl[kSub], gp[kSub], ga[kSub];
+        for (int b = 0; b < kToneBands; ++b) tune(b, p.b[b].hz);
+        float w[kSub], g[kToneBands][kSub], wm[kToneBands][kSub], ws[kToneBands][kSub];
         wR_.set(p.weight, n, w);
-        const double want[3] = {p.lowDb, p.presDb, p.airDb};
-        // Dynamic factors from the bands' levels against their own usual level.
+        // Dynamic factors from each band's level against its own usual level (on the signal it works on).
         for (int i = 0; i < n; ++i) {
-            const double m = 0.5 * (L[i] + R[i]);
-            const double s[3] = {dLow_.process(m), dPres_.process(m), dAir_.process(m)};
-            for (int b = 0; b < 3; ++b) {
-                const double f = fast_[b].push(s[b] * s[b]);
-                const double u = slow_[b].push(s[b] * s[b]);
+            const double m = 0.5 * (L[i] + R[i]), sd = 0.5 * (L[i] - R[i]);
+            for (int b = 0; b < kToneBands; ++b) {
+                const double x = placeMid(p.b[b].place) > 0.5 ? m : sd;
+                const double d = isShelf(b) ? dFo_[b].process(x) : dBq_[b].process(x);
+                const double f = fast_[b].push(d * d), u = slow_[b].push(d * d);
                 const double hot = clamp(f - u, -12.0, 12.0);
-                double fac = want[b] >= 0 ? 1.0 - hot / 8.0 : 1.0 + hot / 8.0;
+                double fac = p.b[b].db >= 0 ? 1.0 - hot / 8.0 : 1.0 + hot / 8.0;
                 fac = clamp(fac, 0.25, 1.5);
                 fac_[b] = fac + (fac_[b] - fac) * k_;
             }
         }
-        double eff[3];
-        for (int b = 0; b < 3; ++b) eff[b] = want[b] * (1.0 + p.dynamic * (fac_[b] - 1.0));
-        gR_[0].set(float(dbToGain(eff[0]) - 1.0), n, gl);
-        gR_[1].set(float(dbToGain(eff[1]) - 1.0), n, gp);
-        gR_[2].set(float(dbToGain(eff[2]) - 1.0), n, ga);
-        for (int c = 0; c < 2; ++c) {
-            float* x = c == 0 ? L : R;
-            for (int i = 0; i < n; ++i) {
-                double y = x[i];
-                y += gl[i] * low_[c].process(y);
-                y += gp[i] * pres_[c].process(y);
-                y += ga[i] * air_[c].process(y);
-                x[i] = float(x[i] + w[i] * (y - x[i]));
+        for (int b = 0; b < kToneBands; ++b) {
+            const double eff = p.b[b].db * (1.0 + p.dynamic * (fac_[b] - 1.0));
+            gR_[b].set(float(dbToGain(eff) - 1.0), n, g[b]);
+            mR_[b].set(float(placeMid(p.b[b].place)), n, wm[b]);
+            sR_[b].set(float(placeSide(p.b[b].place)), n, ws[b]);
+        }
+        for (int i = 0; i < n; ++i) {
+            double ch[2] = {0.5 * (L[i] + R[i]), 0.5 * (L[i] - R[i])};
+            for (int c = 0; c < 2; ++c) {
+                double y = ch[c];
+                for (int b = 0; b < kToneBands; ++b) {
+                    const double f = isShelf(b) ? fo_[b][c].process(y) : bq_[b][c].process(y);
+                    y += double(g[b][i]) * double(c == 0 ? wm[b][i] : ws[b][i]) * f;
+                }
+                ch[c] = y;
             }
+            const double yl = ch[0] + ch[1], yr = ch[0] - ch[1];
+            L[i] = float(L[i] + w[i] * (yl - L[i]));
+            R[i] = float(R[i] + w[i] * (yr - R[i]));
         }
     }
 
 private:
+    static bool isShelf(int b) { return b == 0 || b == 3; }
+    void tune(int b, double hz) {
+        if (hz_[b] > 0 && std::abs(hz - hz_[b]) < 1e-4 * hz_[b]) return;
+        hz_[b] = hz;
+        for (int c = 0; c < 2; ++c) {
+            if (b == 0) fo_[b][c].lowpass(hz, fs_);
+            else if (b == 3) fo_[b][c].highpass(hz, fs_);
+            else bandpass0(bq_[b][c], hz, toneQ(b), fs_);
+        }
+        if (b == 0) dFo_[b].lowpass(hz, fs_);
+        else if (b == 3) dFo_[b].highpass(hz, fs_);
+        else bandpass0(dBq_[b], hz, toneQ(b), fs_);
+    }
+
     double fs_ = 48000, k_ = 0;
-    FirstOrder low_[2], air_[2], dLow_, dAir_;
-    Biquad pres_[2], dPres_;
-    EnvDb fast_[3], slow_[3];
-    double fac_[3]{1, 1, 1};
-    Ramp gR_[3], wR_;
+    double hz_[kToneBands]{};
+    FirstOrder fo_[kToneBands][2], dFo_[kToneBands];
+    Biquad bq_[kToneBands][2], dBq_[kToneBands];
+    EnvDb fast_[kToneBands], slow_[kToneBands];
+    double fac_[kToneBands]{1, 1, 1, 1};
+    Ramp gR_[kToneBands], mR_[kToneBands], sR_[kToneBands], wR_;
 };
 
 // ---------------------------------------------------------------------------

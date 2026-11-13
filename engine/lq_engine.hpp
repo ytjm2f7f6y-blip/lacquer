@@ -10,6 +10,7 @@
 
 #include "lp_space.hpp"
 #include "lq_analysis.hpp"
+#include "lq_linear.hpp"
 #include "lq_params.hpp"
 
 #include <atomic>
@@ -72,19 +73,68 @@ struct Transport {
 struct Meters {
     std::atomic<float> stLufs{-70}, plr{0}, integrated{-70}, truePeak{-120}, peakHold{-120};
     std::atomic<float> driveDb{0}, gr{0}, harshCut{0};
+    // The most gain reduction since the window last looked (it swaps them back to 0), the input, BEFORE.
+    std::atomic<float> glueGrMax{0}, limGrMax{0}, inLufs{-70}, inPeak{-120}, beforeDb{0}, codecPeak{-120};
     std::atomic<bool> guarding{false}, over{false}, learning{true}, spaceActive{false};
     std::atomic<int> key{0};
     std::atomic<float> corr{1};
 };
 
+// Something the monitoring runs through after the master is made (the codec preview). Never in a bounce.
+struct MonitorTap {
+    virtual ~MonitorTap() = default;
+    virtual void process(float* L, float* R, int n) = 0;
+};
+
+// The song's loudness bar by bar, as last played: what came in, what went out and the drive it had.
+// Each bar counts once however often it's played, so looping the chorus can't pass for the song.
+constexpr int kMaxBars = 1024;
+struct BarLevels {
+    std::atomic<float> out[kMaxBars], mix[kMaxBars], drive[kMaxBars];
+    std::atomic<bool> heard[kMaxBars];
+    BarLevels() { clear(); }
+    void clear() { for (int b = 0; b < kMaxBars; ++b) { out[b] = -100; mix[b] = -100; drive[b] = 0; heard[b] = false; } }
+};
+
+// From the bars heard (of the first `bars`): what the limiter's input would measure for the whole
+// song (the output, less the drive each bar had), and how much of the song that rests on.
+inline bool loudnessFromBars(const BarLevels& bl, int bars, double& measured, double& coverage) {
+    bars = std::max(1, std::min(bars, kMaxBars));
+    int heard = 0;
+    double pw = 0; int n = 0;
+    for (int b = 0; b < bars; ++b) {
+        if (!bl.heard[b].load()) continue;
+        ++heard;
+        const double o = bl.out[b].load();
+        if (o > -70) { pw += std::pow(10.0, o / 10.0); ++n; }
+    }
+    coverage = double(heard) / bars;
+    if (n == 0) return false;
+    const double rel = 10 * std::log10(pw / n) - 10;   // the relative gate, bar by bar
+    pw = 0; n = 0;
+    double dr = 0;
+    for (int b = 0; b < bars; ++b) {
+        if (!bl.heard[b].load()) continue;
+        const double o = bl.out[b].load();
+        if (o <= -70 || o <= rel) continue;
+        pw += std::pow(10.0, o / 10.0); dr += bl.drive[b].load(); ++n;
+    }
+    if (n == 0) return false;
+    measured = 10 * std::log10(pw / n) - dr / n;
+    return true;
+}
+
 class Engine {
 public:
+    ~Engine() = default;
     void prepare(double fs, int maxBlock) {
         fs_ = fs;
         clean_.prepare(fs); tone_.prepare(fs); punch_.prepare(fs); even_.prepare(fs); iron_.prepare(fs);
         for (auto& s : sat_) s.prepare(fs, kSub);
         comp_.prepare(fs, kSub); width_.prepare(fs, kSub); space_.prepare(fs, kSub); lim_.prepare(fs, kSub);
-        listen_.prepare(fs); outK_.prepare(fs); limInK_.prepare(fs);
+        listen_.prepare(fs); outK_.prepare(fs); limInK_.prepare(fs); inK_.prepare(fs);
+        lin_.prepare(fs);
+        dry_[0].prepare(size_t(0.4 * fs) + 64); dry_[1].prepare(size_t(0.4 * fs) + 64);
         for (int c = 0; c < 2; ++c) { tp_[c] = lp::TruePeak(); }
         an_.prepare(fs);
         colDry_[0].prepare(size_t(sat_[0].latency() + 4)); colDry_[1].prepare(size_t(sat_[0].latency() + 4));
@@ -96,7 +146,9 @@ public:
         clean_.reset(); tone_.reset(); punch_.reset(); even_.reset(); iron_.reset();
         for (auto& s : sat_) s.reset();
         comp_.reset(); width_.reset(); space_.reset(); lim_.reset(); dither_.reset(); listen_.reset();
-        outK_.reset(); limInK_.reset();
+        outK_.reset(); limInK_.reset(); inK_.reset(); lin_.reset();
+        dry_[0].clear(); dry_[1].clear(); beforeR_.reset();
+        barIdx_ = -1; barOutPw_ = barMixPw_ = barDrive_ = 0; barOutN_ = barMixN_ = 0;
         for (auto& t : tp_) t.reset();
         colDry_[0].clear(); colDry_[1].clear();
         for (int m = 0; m < kProbes; ++m) { probeIn_[m].reset(); probeOut_[m].reset(); contrib_[m] = 0; }
@@ -108,7 +160,12 @@ public:
             std::fill(std::begin(outBuf_[c]), std::end(outBuf_[c]), 0.0f);
         }
     }
-    int latency() const { return kSub + sat_[0].latency() + comp_.latency() + lim_.latency(); }
+    // The delay the host is told about, with TONE in natural or linear phase.
+    int latencyFor(bool linear) const { return kSub + sat_[0].latency() + comp_.latency() + lim_.latency() + (linear ? lin_.latency() : 0); }
+    int latency() const { return latencyFor(linearOn_); }
+    void setMonitorTap(MonitorTap* t) { tap_ = t; }
+    BarLevels& bars() { return bars_; }
+    const BarLevels& bars() const { return bars_; }
 
     SharedSong& song() { return song_; }
     const SharedSong& song() const { return song_; }
@@ -208,8 +265,18 @@ private:
         }
         const bool aids = !t.nonRealtime;   // listening aids never reach a bounce made offline
 
-        // The input, for the listening pass.
+        // The input, for the listening pass, the input meter, BEFORE and the bar map.
         if (listening_ && t.playing) an_.push(L, R, n, curKey_);
+        inK_.push(L, R, n);
+        {
+            float pk = 0;
+            for (int i = 0; i < n; ++i) { dry_[0].push(L[i]); dry_[1].push(R[i]); pk = std::max(pk, std::max(std::abs(L[i]), std::abs(R[i]))); }
+            inPk_ = std::max(double(pk), inPk_ * std::pow(tcCoef(1.5, fs_), n));
+            meters_.inLufs.store(float(inK_.db));
+            meters_.inPeak.store(float(gainToDb(inPk_ + 1e-12)));
+        }
+        if (t.playing && t.hasPpq) feedPass(passMix_, L, R, n, mixBlock_, nullptr, 1);
+        trackBar(t);
 
         // CLEAN
         probeIn_[0].push(L, R, n);
@@ -222,9 +289,11 @@ private:
 
         // TONE
         probeIn_[1].push(L, R, n);
-        ToneParams tp;
-        tp.lowDb = v[tLow]; tp.presDb = v[tPres]; tp.airDb = v[tAir]; tp.dynamic = v[tMode]; tp.weight = v[toneIn];
-        tone_.process(L, R, n, tp);
+        ToneParams tp = toneParamsFrom(v);
+        const bool linear = song[tPhase] >= 0.5f;
+        if (linear != linearOn_) { linearOn_ = linear; lin_.reset(); tone_.reset(); }
+        if (linear) lin_.process(L, R, n, tp);   // (DYNAMIC is a natural-phase thing)
+        else tone_.process(L, R, n, tp);
         probeOut_[1].push(L, R, n);
 
         // DYNAMICS: glue (a slow bus compressor whose threshold follows the music), punch, even.
@@ -237,11 +306,17 @@ private:
             lp::CompParams c;
             c.proc = song[dChan] > 0.5f ? 1 : 0;
             c.threshDb = float(lp::powToDb(progMs_) + 6.0 - v[dGlue] * 0.9);
-            c.ratio = 2.0f; c.mix = 1.0f; c.attackMs = 30; c.releaseMs = 250; c.autoRel = 1; c.kneeDb = 6; c.scHz = 90;
+            static const float attack[5] = {1, 3, 10, 30, 80}, release[4] = {250, 100, 300, 800}, ratio[4] = {1.5f, 2, 3, 4};
+            const int rl = clamp(int(v[dRelease] + 0.5f), 0, 3);
+            c.ratio = ratio[clamp(int(v[dRatio] + 0.5f), 0, 3)]; c.mix = 1.0f;
+            c.attackMs = attack[clamp(int(v[dAttack] + 0.5f), 0, 4)]; c.releaseMs = release[rl]; c.autoRel = rl == 0 ? 1.0f : 0.0f;
+            c.kneeDb = 6; c.scHz = 90;
             c.lookMs = 0; c.link = 1; c.autoMakeup = 0;
             c.weight = v[dynIn] * clamp(v[dGlue] / 1.5f, 0.0f, 1.0f);
             comp_.process(L, R, n, c);
-            meters_.gr.store(comp_.takeGr());
+            const float gr = comp_.takeGr();
+            meters_.gr.store(gr);
+            if (gr > meters_.glueGrMax.load(std::memory_order_relaxed)) meters_.glueGrMax.store(gr, std::memory_order_relaxed);
         }
         punch_.process(L, R, n, v[dPunch], v[dynIn]);
         even_.process(L, R, n, v[dEven], v[dynIn]);
@@ -318,6 +393,20 @@ private:
         // the song plays (so the song's own ups and downs are kept) and moves only when it stops.
         limInK_.push(L, R, n);
         if (t.playing) feedPass(passIn_, L, R, n, limInBlock_, listening_ ? an_.stats().limIn : nullptr);
+        // The limiter's input peaks, for the knee: after CLEAN, TONE, PUNCH and the rest have had their say.
+        if (listening_ && t.playing) {
+            const int win = std::max(1, int(0.01 * fs_));
+            auto& st = an_.stats();
+            for (int i = 0; i < n; ++i) {
+                limPk_ = std::max(limPk_, double(std::max(std::abs(L[i]), std::abs(R[i]))));
+                if (++limPkN_ >= win) {
+                    const int bin = int(clamp((gainToDb(limPk_ + 1e-12) + 70.0) * 2.0, 0.0, double(kPkBins - 1)));
+                    st.limIn[0].pk[bin] += 1; st.limIn[0].windows += 1;
+                    if (curKey_ > 0) { st.limIn[curKey_].pk[bin] += 1; st.limIn[curKey_].windows += 1; }
+                    limPk_ = 0; limPkN_ = 0;
+                }
+            }
+        }
         // The section's own target, if it has one (gliding in with the rest of its settings): a
         // section driven less than the song plays quieter and keeps more of its peaks.
         double target = v[lTarget];
@@ -342,16 +431,24 @@ private:
             lpm.ceilingDb = on ? song[lCeiling] : 0.0f;
             lpm.clip = on && song[lClip] > 0.05f ? 1.0f : 0.0f;
             lpm.clipAmt = song[lClip] / 10.0f;
-            lpm.releaseMs = 250; lpm.character = 0.35f; lpm.lookMs = 5; lpm.fastMs = 8; lpm.link = 0.9f; lpm.osFactor = 4;
+            // Styles: CLEAN holds on and lets go slowly; PUNCHY reacts late and lets go sooner, so the hits
+            // keep their front; DENSE lets go fast, for the most loudness from the least peak.
+            static const float look[3] = {7, 2.5f, 5}, chr[3] = {0.25f, 0.45f, 0.75f}, fast[3] = {12, 6, 3}, rel[3] = {400, 180, 80};
+            static const float relSet[4] = {0, 60, 200, 600};
+            const int st = clamp(int(song[lStyle] + 0.5f), 0, 2), rs = clamp(int(song[lRelease] + 0.5f), 0, 3);
+            lpm.releaseMs = rs == 0 ? rel[st] : relSet[rs]; lpm.character = chr[st]; lpm.lookMs = look[st]; lpm.fastMs = fast[st];
+            lpm.link = 0.9f; lpm.osFactor = 4;
             const int dith = int(song[oDither]);
             lpm.ceilingMargin = dith == 2 ? float(2.0 / 32768.0) : 0.0f;
             lim_.process(L, R, n, lpm);
+            const float lg = lim_.takeGr();
+            if (lg > meters_.limGrMax.load(std::memory_order_relaxed)) meters_.limGrMax.store(lg, std::memory_order_relaxed);
             if (dith > 0) dither_.process(L, R, n, 1, dith == 2 ? 16 : 24);
         }
 
         // Meters, on what leaves for the bounce.
         outK_.push(L, R, n);
-        if (t.playing) feedPass(passOut_, L, R, n, outBlock_, listening_ ? an_.stats().out : nullptr);
+        if (t.playing) feedPass(passOut_, L, R, n, outBlock_, listening_ ? an_.stats().out : nullptr, t.hasPpq ? 0 : -1);
         double tpk = 0;
         for (int i = 0; i < n; ++i) {
             const double a = std::max(tp_[0].process(L[i]), tp_[1].process(R[i]));
@@ -367,6 +464,28 @@ private:
         meters_.integrated.store(float(passOut_.seconds > 1 ? passOut_.integrated() : -70.0));
         meters_.over.store(tpDb > song[lCeiling] + 0.05);
 
+        // BEFORE: the song as it came in, lined up and turned to the master's loudness.
+        {
+            if (inK_.db > -50 && outK_.db > -50) {
+                const double want = clamp(outK_.db - inK_.db, -12.0, 30.0);
+                beforeDb_ += (want - beforeDb_) * (1 - std::pow(tcCoef(3.0, fs_), n));
+            }
+            meters_.beforeDb.store(float(beforeDb_));
+            float bw[kSub];
+            beforeR_.set(aids && song[oBefore] > 0.5f ? 1.0f : 0.0f, n, bw);
+            if (beforeR_.cur > 0.0f || bw[0] > 0.0f) {
+                const size_t lat = size_t(latency() - kSub + n - 1);
+                const double g = dbToGain(beforeDb_);
+                for (int i = 0; i < n; ++i) {
+                    const double dl = dry_[0].tap(lat - size_t(i)) * g, dr = dry_[1].tap(lat - size_t(i)) * g;
+                    L[i] = float(L[i] + bw[i] * (dl - L[i]));
+                    R[i] = float(R[i] + bw[i] * (dr - R[i]));
+                }
+            }
+        }
+        // The codec preview: what the listener's encoder makes of it.
+        if (aids && tap_ && song[oCodec] > 0.5f) tap_->process(L, R, n);
+
         // Listening aids: never in an offline bounce.
         if (aids) {
             if (song[sHear] > 0.5f) for (int i = 0; i < n; ++i) { const float m = 0.5f * (L[i] + R[i]); L[i] = R[i] = m; }
@@ -379,7 +498,8 @@ private:
 
     // 400 ms K-weighted blocks with 75 % overlap, for the integrated loudness of a pass.
     struct BlockAcc { lp::Biquad pre[2], rlb[2]; double sub = 0, q[4]{}; int n = 0, qi = 0; bool init = false; };
-    void feedPass(KeyStats& ks, const float* L, const float* R, int n, BlockAcc& b, KeyStats* perKey = nullptr) {
+    // stream: 0 the output (the bar map's level and drive), 1 the mix as it came in, -1 neither.
+    void feedPass(KeyStats& ks, const float* L, const float* R, int n, BlockAcc& b, KeyStats* perKey = nullptr, int stream = -1) {
         if (!b.init) {
             KLevel k; k.prepare(fs_);
             for (int c = 0; c < 2; ++c) { b.pre[c] = k.pre[c]; b.rlb[c] = k.rlb[c]; }
@@ -394,6 +514,9 @@ private:
                 if (++b.qi >= 4) {
                     const double ms = 0.25 * (b.q[0] + b.q[1] + b.q[2] + b.q[3]);
                     const double lu = -0.691 + 10 * std::log10(ms + 1e-20);
+                    if (stream == 0 && barIdx_ >= 0) { barOutPw_ += ms; barDrive_ += driveNow_; ++barOutN_; }
+                    if (stream == 1 && barIdx_ >= 0) { barMixPw_ += ms; ++barMixN_; }
+                    if (stream == 1) { b.sub = 0; b.n = 0; continue; }   // the mix only feeds the bar map
                     ks.blocks.push_back(lu);
                     ks.aux.push_back(driveNow_);
                     ks.seconds += 0.1;
@@ -407,6 +530,29 @@ private:
                 b.sub = 0; b.n = 0;
             }
         }
+    }
+
+    // The bar map: the bar the playhead is in collects the blocks that end in it; leaving it (or
+    // stopping) files them, replacing whatever that bar had from an earlier play.
+    void trackBar(const Transport& t) {
+        const int bar = (t.playing && t.hasPpq && t.ppq >= 0) ? int(std::floor(t.ppq / std::max(1.0, t.quartersPerBar) + 1e-9)) : -1;
+        if (bar == barIdx_) return;
+        if (barIdx_ >= 0 && barIdx_ < kMaxBars && barOutN_ >= 2) {
+            bars_.out[barIdx_].store(float(-0.691 + 10 * std::log10(barOutPw_ / barOutN_ + 1e-20)));
+            bars_.drive[barIdx_].store(float(barDrive_ / barOutN_));
+            if (barMixN_ > 0) bars_.mix[barIdx_].store(float(-0.691 + 10 * std::log10(barMixPw_ / barMixN_ + 1e-20)));
+            bars_.heard[barIdx_].store(true);
+        }
+        barIdx_ = bar;
+        barOutPw_ = barMixPw_ = barDrive_ = 0; barOutN_ = barMixN_ = 0;
+    }
+public:
+    static ToneParams toneParamsFrom(const Values& v) {
+        ToneParams tp;
+        const int db[kToneBands] = {tLow, tMud, tPres, tAir}, hz[kToneBands] = {tLowHz, tMudHz, tPresHz, tAirHz}, pl[kToneBands] = {tLowPl, tMudPl, tPresPl, tAirPl};
+        for (int b = 0; b < kToneBands; ++b) { tp.b[b].db = v[db[b]]; tp.b[b].hz = v[hz[b]]; tp.b[b].place = v[pl[b]]; }
+        tp.dynamic = v[tMode]; tp.weight = v[toneIn];
+        return tp;
     }
 
 public:
@@ -424,7 +570,19 @@ private:
     lp::Limiter lim_;
     lp::Dither dither_;
     ListenOn listen_;
-    KLevel outK_, limInK_, probeIn_[kProbes], probeOut_[kProbes];
+    KLevel outK_, limInK_, inK_, probeIn_[kProbes], probeOut_[kProbes];
+    LinearTone lin_;
+    bool linearOn_ = false;
+    lp::Delay dry_[2];
+    Ramp beforeR_;
+    double beforeDb_ = 0, inPk_ = 0;
+    MonitorTap* tap_ = nullptr;
+    BarLevels bars_;
+    KeyStats passMix_;
+    BlockAcc mixBlock_;
+    int barIdx_ = -1, barOutN_ = 0, barMixN_ = 0, limPkN_ = 0;
+    double limPk_ = 0;
+    double barOutPw_ = 0, barMixPw_ = 0, barDrive_ = 0;
     double contrib_[kProbes]{};
     lp::TruePeak tp_[2];
     lp::Delay colDry_[2];

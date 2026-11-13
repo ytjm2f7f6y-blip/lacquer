@@ -43,8 +43,10 @@ public:
     void tick(int frames = 1);
     void showHelp(const char* id) { hoverId_ = id; }
     void pickBlock(int i) { selMark_ = i; }
+    void showBubble(int controlIndex) { bubble_ = controlIndex; bubbleUntil_ = clock_ + 60.0; }
 
     static constexpr float kHelpH = 80.0f;
+    float helpH() const { return helpOn_ ? kHelpH : 0.0f; }
 
 private:
     struct Needle { double pos = 0, vel = 0; };
@@ -79,9 +81,20 @@ private:
     void drawMoves(juce::Graphics&);
     void drawChecks(juce::Graphics&);
     void drawSections(juce::Graphics&);
+    void drawDetail(juce::Graphics&);
+    void drawLane(juce::Graphics&);
+    bool detailClick(juce::Point<float> pt, const juce::MouseEvent&);
+    void detailDrag(juce::Point<float> pt, const juce::MouseEvent&);
+    int balanceChipAt(juce::Point<float> pt) const;
+    void chooseReferences();
+    void askStyleName();
+    void stepChoice(int p, int dir);
+    void followDetail(int p);
+    void drawBubble(juce::Graphics&);
     void header(juce::Graphics&, const juce::String& l1, const juce::String& l2);
     void screenClick(juce::Point<float> pt, const juce::MouseEvent&);
     int moveRowAt(juce::Point<float> pt) const;
+    int movesShown() const { return proc_.result().moves.size() > 6 ? 5 : 6; }   // room for the scroll note
     int blockAt(juce::Point<float> pt, bool& nearEdge) const;
     int softKeyAt(juce::Point<float> pt) const;
     void showKeyMenu(int markIndex);
@@ -121,6 +134,14 @@ private:
     juce::Point<float> dragLast_;
     bool dragMoved_ = false, dropHover_ = false;
     int selMark_ = -1, softDown_ = -1;   // the SECTIONS screen: the picked block, the soft key held down
+    int toneBand_ = 1, dragBand_ = -1;   // the DETAIL page's EQ: the picked band, the one being dragged
+    float glueHist_[240]{}, limHist_[240]{};
+    int histPos_ = 0;
+    double outPkHold_ = -120;
+    int bubble_ = -1;                    // a knob's value shown beside it while it turns
+    double bubbleUntil_ = 0;
+    bool helpOn_ = true;
+    std::unique_ptr<juce::FileChooser> chooser_;
     juce::String hoverId_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LacquerEditor)

@@ -101,6 +101,7 @@ LacquerProcessor::LacquerProcessor()
     }
     for (int k = 1; k <= kSections; ++k) sectionNames_[size_t(k - 1)] = juce::String(defaultKeyName(k));
     engine_.prepare(48000, 512);
+    engine_.setMonitorTap(&codec_);
     loadTaste();
     rebuildTarget();
     startTimerHz(15);
@@ -120,7 +121,10 @@ bool LacquerProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const 
 void LacquerProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) {
     sampleRate_ = sampleRate;
     engine_.prepare(sampleRate, std::max(16, samplesPerBlock));
-    setLatencySamples(engine_.latency());
+    lastPhase_ = songValue(tPhase) >= 0.5f;
+    setLatencySamples(engine_.latencyFor(lastPhase_));
+    codec_.prepare(sampleRate);
+    codec_.setBitrate(juce::roundToInt(songValue(oCodecRate)) == 1 ? 128 : 256);
 }
 
 Values LacquerProcessor::songValues() const {
@@ -161,7 +165,10 @@ void LacquerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     if ((t.playing && !wasPlaying_) || resetPass_.exchange(false)) {
         if (!engineListening_) engine_.clearPass();
         playedSeconds_ = 0;
+        codec_.resetPeak();
     }
+    if (t.playing && t.hasPpq) sawPpq_ = true;
+    const bool stopping = wasPlaying_ && !t.playing;
     // The listening pass.
     const bool want = listenWanted_.load();
     if (want && !engineListening_) {
@@ -171,22 +178,29 @@ void LacquerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
         engineListening_ = true;
         listenSeconds_.store(0);
     }
+    // The loudness stage learns the song from the bar map: every bar played, each one once, so a
+    // loop of the chorus can't pass for the whole song. (A host with no bar positions: the last play.)
+    auto calibrate = [&] {
+        double m = 0, cov = 0;
+        if (sawPpq_ && loudnessFromBars(engine_.bars(), songBars(), m, cov)) {
+            engine_.setMeasuredInput(m, true);
+            coverage_.store(cov);
+        } else if (playedSeconds_ >= 20.0) {
+            engine_.setMeasuredInput(engine_.calibratedInput(), true);
+            coverage_.store(-1);
+        } else {
+            return;
+        }
+        calibrated_.store(true);
+    };
+    bool endPassNow = false;
     auto endPass = [&] {
         engineListening_ = false;
         engine_.setListening(false);
-        engine_.setMeasuredInput(engine_.calibratedInput(), true);
-        passReady_.store(true);
+        endPassNow = true;
     };
     if (!want && engineListening_) endPass();
-    if (wasPlaying_ && !t.playing) {
-        if (engineListening_ && listenSeconds_.load() > 8.0) { listenWanted_.store(false); endPass(); }
-        else if (!engineListening_ && playedSeconds_ >= 20.0 && (!engine_.measuredKnown() || playedSeconds_ >= 0.5 * longestPlay_)) {
-            // A long enough play keeps the loudness stage calibrated as the settings change.
-            engine_.setMeasuredInput(engine_.calibratedInput(), true);
-            longestPlay_ = std::max(longestPlay_, playedSeconds_);
-            calibrated_.store(true);
-        }
-    }
+    if (stopping && engineListening_ && listenSeconds_.load() > 8.0) { listenWanted_.store(false); endPass(); }
     engine_.setListening(engineListening_);
     if (engineListening_ && t.playing) listenSeconds_.store(listenSeconds_.load() + secs);
     if (t.playing) playedSeconds_ += secs;
@@ -203,6 +217,38 @@ void LacquerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
         for (int i = 0; i < n; ++i) L[i] = 0.5f * (L[i] + mono_[size_t(i)]);
     }
     for (int c = 2; c < buffer.getNumChannels(); ++c) buffer.clear(c, 0, n);
+    // After the engine has filed the last bar.
+    if (endPassNow) { calibrate(); passReady_.store(true); }
+    else if (stopping && playedSeconds_ >= 4.0) calibrate();
+}
+
+int LacquerProcessor::songBars() const {
+    const double q = std::max(1.0, quartersPerBar_.load());
+    double end = maxPpq_.load();
+    const auto& m = songMap();
+    if (m.count > 0) end = std::max(end, m.marks[m.count - 1].ppq + q);
+    return std::max(1, std::min(lq::kMaxBars, int(std::ceil(end / q - 1e-6))));
+}
+
+void LacquerProcessor::forgetLoudness() {
+    engine_.bars().clear();
+    engine_.setMeasuredInput(-14.0, false);
+    coverage_.store(-1);
+    maxPpq_.store(0);
+    resetPass_.store(true);
+    bump();
+}
+
+bool LacquerProcessor::showHelpStrip() const {
+    juce::PropertiesFile f(settingsOptions());
+    return f.getBoolValue("helpStrip", true);
+}
+
+void LacquerProcessor::setShowHelpStrip(bool on) {
+    juce::PropertiesFile f(settingsOptions());
+    f.setValue("helpStrip", on);
+    f.saveIfNeeded();
+    bump();
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +413,11 @@ void LacquerProcessor::setListening(bool on) {
 }
 
 void LacquerProcessor::idle() {
+    // TONE's phase changes the delay; the bit rate restarts the encoder.
+    const bool phase = songValue(tPhase) >= 0.5f;
+    if (phase != lastPhase_) { lastPhase_ = phase; setLatencySamples(engine_.latencyFor(phase)); bump(); }
+    const int kbps = juce::roundToInt(songValue(oCodecRate)) == 1 ? 128 : 256;
+    if (kbps != codec_.kbps()) { codec_.setBitrate(kbps); bump(); }
     if (passReady_.exchange(false)) finishPass();
     if (calibrated_.exchange(false)) bump();
     const float amt = songValue(aAmount);
@@ -386,15 +437,73 @@ void LacquerProcessor::rebuildTarget() {
     const int t = juce::roundToInt(songValue(aTarget));
     if (t == 1 && !refCurves_.empty()) target_ = averageTarget(refCurves_, juce::String(int(refCurves_.size())).toStdString() + (refCurves_.size() == 1 ? " reference" : " references"));
     else if (t == 2 && !mineCurves_.empty()) target_ = averageTarget(mineCurves_, "your masters");
-    else target_ = genreTarget(genre_);
+    else target_ = styleTarget(genre_);
     if (t == 1 && refCurves_.empty()) target_.name = "no references yet: " + target_.name;
     if (t == 2 && mineCurves_.empty()) target_.name = "no masters yet: " + target_.name;
 }
 
-void LacquerProcessor::setGenre(int g) {
+int LacquerProcessor::numStyles() const {
     int n = 0;
     genres(n);
+    return n + int(userStyles_.size());
+}
+
+juce::String LacquerProcessor::styleName(int i) const {
+    int n = 0;
+    const auto* g = genres(n);
+    if (i < n) return g[std::max(0, i)].name;
+    const int u = i - n;
+    return u < int(userStyles_.size()) ? userStyles_[size_t(u)].name : juce::String();
+}
+
+bool LacquerProcessor::styleIsYours(int i) const {
+    int n = 0;
+    genres(n);
+    return i >= n;
+}
+
+lq::Target LacquerProcessor::styleTarget(int i) const {
+    int n = 0;
+    genres(n);
+    if (i >= n && i - n < int(userStyles_.size())) {
+        const auto& u = userStyles_[size_t(i - n)];
+        return averageTarget(u.curves, u.name.toStdString());
+    }
+    return genreTarget(std::max(0, std::min(i, n - 1)));
+}
+
+void LacquerProcessor::setGenre(int g) {
+    const int n = numStyles();
     genre_ = (g % n + n) % n;
+    rebuildTarget();
+    if (haveStats_) runAssistant();
+    bump();
+}
+
+void LacquerProcessor::saveReferencesAsStyle(const juce::String& name) {
+    const auto nm = name.trim().toLowerCase().substring(0, 24);
+    if (nm.isEmpty() || refCurves_.empty()) return;
+    for (auto it = userStyles_.begin(); it != userStyles_.end(); ++it)
+        if (it->name == nm) { userStyles_.erase(it); break; }
+    userStyles_.push_back({nm, refCurves_});
+    saveTaste();
+    int n = 0;
+    genres(n);
+    genre_ = n + int(userStyles_.size()) - 1;
+    setSong(aTarget, 0.0f);
+    lastNote = "SAVED AS A STYLE: " + nm.toUpperCase();
+    rebuildTarget();
+    if (haveStats_) runAssistant();
+    bump();
+}
+
+void LacquerProcessor::removeStyle(int i) {
+    int n = 0;
+    genres(n);
+    if (i < n || i - n >= int(userStyles_.size())) return;
+    userStyles_.erase(userStyles_.begin() + (i - n));
+    saveTaste();
+    if (genre_ >= numStyles()) genre_ = 0;
     rebuildTarget();
     if (haveStats_) runAssistant();
     bump();
@@ -494,6 +603,15 @@ void LacquerProcessor::loadTaste() {
     mineCurves_.clear();
     for (const auto& line : juce::StringArray::fromLines(f.getValue("mine")))
         if (auto c = curveFromText(line); !c.empty()) mineCurves_.push_back(std::move(c));
+    userStyles_.clear();
+    if (auto xml = f.getXmlValue("styles"))
+        for (auto* e : xml->getChildIterator()) {
+            UserStyle u;
+            u.name = e->getStringAttribute("name");
+            for (const auto& line : juce::StringArray::fromLines(e->getAllSubText()))
+                if (auto c = curveFromText(line); !c.empty()) u.curves.push_back(std::move(c));
+            if (u.name.isNotEmpty() && !u.curves.empty()) userStyles_.push_back(std::move(u));
+        }
 }
 
 void LacquerProcessor::saveTaste() const {
@@ -505,6 +623,15 @@ void LacquerProcessor::saveTaste() const {
     juce::StringArray lines;
     for (const auto& c : mineCurves_) lines.add(curveToText(c.data(), kBands));
     f.setValue("mine", lines.joinIntoString("\n"));
+    juce::XmlElement styles("styles");
+    for (const auto& u : userStyles_) {
+        auto* e = styles.createNewChildElement("style");
+        e->setAttribute("name", u.name);
+        juce::StringArray cl;
+        for (const auto& c : u.curves) cl.add(curveToText(c.data(), kBands));
+        e->addTextElement(cl.joinIntoString("\n"));
+    }
+    f.setValue("styles", &styles);
     f.saveIfNeeded();
 }
 
@@ -706,6 +833,14 @@ void LacquerProcessor::getStateInformation(juce::MemoryBlock& destData) {
     as.setProperty("measured", engine_.measuredInput(), nullptr);
     as.setProperty("measuredKnown", engine_.measuredKnown(), nullptr);
     as.setProperty("genre", genre_, nullptr);
+    as.setProperty("coverage", coverage_.load(), nullptr);
+    {   // the bar map: bar, out, drive, mix
+        juce::StringArray b;
+        const auto& bl = engine_.bars();
+        for (int i = 0; i < lq::kMaxBars; ++i)
+            if (bl.heard[i].load()) b.add(juce::String(i) + ":" + juce::String(bl.out[i].load(), 2) + "," + juce::String(bl.drive[i].load(), 2) + "," + juce::String(bl.mix[i].load(), 2));
+        as.setProperty("bars", b.joinIntoString(";"), nullptr);
+    }
     juce::StringArray refs;
     for (const auto& c : refCurves_) refs.add(curveToText(c.data(), kBands));
     as.setProperty("refs", refs.joinIntoString("\n"), nullptr);
@@ -752,6 +887,7 @@ void LacquerProcessor::getStateInformation(juce::MemoryBlock& destData) {
     // The window.
     juce::ValueTree ui("ui");
     ui.setProperty("scale", uiScale, nullptr); ui.setProperty("page", page, nullptr); ui.setProperty("tray", trayOpen, nullptr);
+    ui.setProperty("detail", detailTab, nullptr);
     ui.setProperty("preset", presetName, nullptr); ui.setProperty("ab", ab_, nullptr);
     for (int s = 0; s < 2; ++s) if (abState_[s].isValid()) { auto c = abState_[s].createCopy(); c.setProperty("slot", s, nullptr); ui.appendChild(c, nullptr); }
     root.appendChild(ui, nullptr);
@@ -774,7 +910,19 @@ void LacquerProcessor::setStateInformation(const void* data, int sizeInBytes) {
     engine_.editKey_.store(juce::jlimit(0, kNumKeys - 1, int(sec.getProperty("editKey", 0))));
     const auto as = root.getChildWithName("assistant");
     if (bool(as.getProperty("measuredKnown", false))) engine_.setMeasuredInput(double(as.getProperty("measured", -14.0)), true);
-    genre_ = int(as.getProperty("genre", 0));
+    genre_ = juce::jlimit(0, std::max(0, numStyles() - 1), int(as.getProperty("genre", 0)));
+    coverage_.store(double(as.getProperty("coverage", -1.0)));
+    engine_.bars().clear();
+    for (const auto& item : juce::StringArray::fromTokens(as.getProperty("bars").toString(), ";", "")) {
+        const int bar = item.upToFirstOccurrenceOf(":", false, false).getIntValue();
+        const auto v3 = juce::StringArray::fromTokens(item.fromFirstOccurrenceOf(":", false, false), ",", "");
+        if (bar < 0 || bar >= lq::kMaxBars || v3.size() != 3) continue;
+        auto& bl = engine_.bars();
+        bl.out[bar].store(v3[0].getFloatValue()); bl.drive[bar].store(v3[1].getFloatValue()); bl.mix[bar].store(v3[2].getFloatValue());
+        bl.heard[bar].store(true);
+        sawPpq_ = true;
+        maxPpq_.store(std::max(maxPpq_.load(), (bar + 1) * quartersPerBar_.load()));
+    }
     refCurves_.clear();
     for (const auto& line : juce::StringArray::fromLines(as.getProperty("refs").toString()))
         if (auto c = curveFromText(line); !c.empty()) refCurves_.push_back(std::move(c));
@@ -824,6 +972,7 @@ void LacquerProcessor::setStateInformation(const void* data, int sizeInBytes) {
     uiScale = float(ui.getProperty("scale", 1.0f));
     page = int(ui.getProperty("page", 0));
     trayOpen = bool(ui.getProperty("tray", false));
+    detailTab = juce::jlimit(0, 3, int(ui.getProperty("detail", 0)));
     presetName = ui.getProperty("preset", presetName).toString();
     ab_ = int(ui.getProperty("ab", 0));
     for (const auto& c : ui) if (c.hasType("snapshot")) abState_[juce::jlimit(0, 1, int(c.getProperty("slot", 0)))] = c.createCopy();

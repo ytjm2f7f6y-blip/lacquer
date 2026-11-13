@@ -95,7 +95,7 @@ int main() {
 
         // ---- loudness: the first play learns the song, the second lands on the target
         play(p, head, song, block);
-        CHECK(p.loudnessKnown(), "a full play teaches it the song's loudness");
+        CHECK(p.loudnessKnown() && p.coverage() > 0.9, "a full play teaches it the song's loudness, bar by bar");
         play(p, head, song, block);
         const float integ = p.meters().integrated.load(), tp = p.meters().peakHold.load();
         std::printf("      second play: %.2f LUFS integrated (target %.1f), true peak %.2f dBTP (ceiling %.1f)\n", integ, p.songValue(lTarget), tp, p.songValue(lCeiling));
@@ -226,6 +226,43 @@ int main() {
         CHECK(qm.count == 4 && q.result().contrast.loud == 3 && qm.has[3][dGlue] && std::abs(qm.val[3][dGlue] - p.songMap().val[3][dGlue]) < 1e-4f && q.sectionName(3) == "hook", "marks, sections' own settings and names come back");
         CHECK(q.result().any && q.result().moves.size() == r.moves.size() && q.loudnessKnown() && q.result().knee.known, "and so do the assistant's findings and the learnt loudness");
 
+        // ---- TONE in linear phase tells the host about its delay
+        {
+            const int before = p.getLatencySamples();
+            p.setSong(tPhase, 1.0f);
+            p.idle();
+            const int lin = p.getLatencySamples();
+            p.setSong(tPhase, 0.0f);
+            p.idle();
+            CHECK(lin > before + 1000 && p.getLatencySamples() == before, "linear phase adds its delay, and the host is told");
+        }
+
+        // ---- the codec preview
+        {
+#if JUCE_MAC
+            juce::AudioBuffer<float> io(2, block);
+            juce::MidiBuffer midi;
+            auto runFor = [&](double secs, bool codec) {
+                p.setSong(oCodec, codec ? 1.0f : 0.0f);
+                double ms = 0; int cnt = 0;
+                const int blocks = int(secs * sr / block);
+                for (int k = 0; k < blocks; ++k) {
+                    for (int i = 0; i < block; ++i) { const float x = 0.2f * std::sin(0.0261799f * float(k * block + i)); io.setSample(0, i, x); io.setSample(1, i, x); }
+                    p.processBlock(io, midi);
+                    p.codec().drain(50);
+                    if (k > blocks * 3 / 4) for (int i = 0; i < block; ++i) { ms += io.getSample(0, i) * io.getSample(0, i); ++cnt; }
+                }
+                return 10 * std::log10(ms / std::max(1, cnt) + 1e-20);
+            };
+            const double plain = runFor(1.0, false), coded = runFor(2.0, true);
+            std::printf("      codec %s: %.2f dB through AAC against %.2f dB without, peak after encoding %.2f dBTP\n", p.codecAvailable() ? "on" : "unavailable", coded, plain, p.codecPeak());
+            CHECK(p.codecAvailable() && std::abs(coded - plain) < 1.5 && p.codecPeak() > -100, "CODEC plays the master back through Apple's AAC encoder");
+            p.setSong(oCodec, 0.0f);
+#else
+            CHECK(!p.codecAvailable() && p.codecWhy().isNotEmpty(), "CODEC says why it can't run here (it needs a Mac)");
+#endif
+        }
+
         // ---- presets
         bool presetsOk = true;
         for (int i = 0; i < LacquerProcessor::factoryPresets().size(); ++i) {
@@ -240,11 +277,11 @@ int main() {
             for (bool tray : {false, true}) {
                 p.uiScale = s; p.trayOpen = tray;
                 std::unique_ptr<juce::AudioProcessorEditor> ed(p.createEditor());
-                const int wantH = juce::roundToInt((layout::H + (tray ? layout::kTrayH : 0) + LacquerEditor::kHelpH) * s);
+                const int wantH = juce::roundToInt((layout::H + (tray ? layout::kTrayH : 0) + (p.showHelpStrip() ? LacquerEditor::kHelpH : 0.0f)) * s);
                 windowOk = windowOk && ed->getWidth() == juce::roundToInt(layout::W * s) && ed->getHeight() == wantH;
-                for (int pg = 0; pg < 5; ++pg) { p.page = pg; auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f); windowOk = windowOk && img.isValid(); }
+                for (int pg = 0; pg < 6; ++pg) { p.page = pg; for (int tab = 0; tab < 4; ++tab) { p.detailTab = tab; if (pg != 5 && tab > 0) break; auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f); windowOk = windowOk && img.isValid(); } }
             }
-        CHECK(windowOk, "the window draws every screen page at 75, 100 and 150%, with the tray in and out");
+        CHECK(windowOk, "the window draws every screen page (and every DETAIL tab) at 75, 100 and 150%, with the tray in and out");
     }
 
     // ---- block sizes, mono, offline
