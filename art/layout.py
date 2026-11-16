@@ -190,9 +190,9 @@ strip("clean", True,
       ("c_rumble", "RUMBLE", [(0, "OFF"), (0.5, "30"), (1, "80")], TEN, "Hz", 0.3),
       ("toggle", "c_hear", "REMOVED", "RESULT", "HEAR", "down"))
 strip("tone", True,
-      ("t_low", "LOW", [(0, "-6"), (0.5, "0"), (1, "+6")], ticks_lin(-6, 6, 1), "dB", 0.5),
-      ("t_pres", "PRESENCE", [(0, "-6"), (0.5, "0"), (1, "+6")], ticks_lin(-6, 6, 1), "dB", lin(-6, 6, -0.8)),
-      ("t_air", "AIR", [(0, "-6"), (0.5, "0"), (1, "+6")], ticks_lin(-6, 6, 1), "dB", lin(-6, 6, 1.5)),
+      ("t_low", "LOW", [(0, "-12"), (0.5, "0"), (1, "+12")], ticks_lin(-12, 12, 2), "dB", 0.5),
+      ("t_pres", "PRESENCE", [(0, "-12"), (0.5, "0"), (1, "+12")], ticks_lin(-12, 12, 2), "dB", 0.5),
+      ("t_air", "AIR", [(0, "-12"), (0.5, "0"), (1, "+12")], ticks_lin(-12, 12, 2), "dB", lin(-12, 12, 1.0)),
       ("toggle", "t_mode", "DYNAMIC", "STATIC", "MODE", "up"))
 strip("dyn", False,
       ("d_glue", "GLUE", [(0, "0"), (1, "10")], TEN, None, 0.4),

@@ -48,7 +48,9 @@ Then, on the stereo output: Audio FX > Audio Units > Rumpus Room Records > Lacqu
 ## How it works, briefly
 
 **LOUDNESS** works out its own drive: the target less the loudness the limiter's input
-measured. It learns that from the song bar by bar: every bar you play is filed, each
+measured. Until it has heard the song, GUARD keeps the target to -13 LUFS, and a safety
+hold never pushes any stretch of the song more than 5 dB past the target, so a figure
+learnt from a quiet intro can't crush the chorus that follows. It learns the song bar by bar: every bar you play is filed, each
 bar once, so a loop of the chorus can't pass for the whole song, and the DETAIL screen
 says how much of the song the figure rests on. The drive is fixed while the song plays
 (so the song keeps its own rises and falls) and moves only when it stops. GUARD finds
@@ -56,8 +58,8 @@ the loudness where the limiter starts eating transients (the knee) from the peak
 the limiter's own input, after PUNCH and the rest, and won't drive past it. The limiter
 is true-peak, after an optional soft clipper, in three styles: CLEAN, PUNCHY, DENSE.
 
-**TONE** has four bands: a low shelf (40-250 Hz), a mud bell (120-800 Hz), a presence
-bell (1-6 kHz) and an air shelf (5-18 kHz). The faceplate's knobs set three gains; the
+**TONE** has four bands, each +-12 dB: a low shelf (40-250 Hz), a mud bell (120-800 Hz),
+a presence bell (1-6 kHz) and an air shelf (5-18 kHz). The faceplate's knobs set three gains; the
 DETAIL screen has all four, their frequencies, and puts each on the stereo, the mid or
 the side. In natural phase it adds no delay and can work dynamically; in linear phase
 it is one symmetric FIR on the mid and one on the side (48 ms of delay at 44.1/48 kHz),

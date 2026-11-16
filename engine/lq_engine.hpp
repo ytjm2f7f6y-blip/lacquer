@@ -74,7 +74,7 @@ struct Meters {
     std::atomic<float> stLufs{-70}, plr{0}, integrated{-70}, truePeak{-120}, peakHold{-120};
     std::atomic<float> driveDb{0}, gr{0}, harshCut{0};
     // The most gain reduction since the window last looked (it swaps them back to 0), the input, BEFORE.
-    std::atomic<float> glueGrMax{0}, limGrMax{0}, inLufs{-70}, inPeak{-120}, beforeDb{0}, codecPeak{-120};
+    std::atomic<float> glueGrMax{0}, limGrMax{0}, inLufs{-70}, inPeak{-120}, beforeDb{0}, codecPeak{-120}, safetyDb{0};
     std::atomic<bool> guarding{false}, over{false}, learning{true}, spaceActive{false};
     std::atomic<int> key{0};
     std::atomic<float> corr{1};
@@ -185,7 +185,15 @@ public:
     double passSeconds() const { return passIn_.seconds; }
     void clearPass() { passIn_.clear(); passOut_.clear(); peakTp_ = -120; passDriveSum_ = 0; passDriveN_ = 0; }
     double passOutputLufs() const { return passOut_.integrated(); }
-    void setKnee(double kneeLufs, bool known) { knee_ = kneeLufs; kneeKnown_ = known; }
+    void setKnee(double kneeLufs, bool known) { knee_.store(kneeLufs); kneeKnown_.store(known); }
+    bool kneeKnown() const { return kneeKnown_.load(); }
+    double kneeLufs() const { return knee_.load(); }
+    // The running count of 10 ms peaks at the limiter's input, over every play (for the knee).
+    const double* kneePeaks() const { return kneePk_; }
+    double kneeWindows() const { return kneeWin_; }
+    void forgetSong() { bars_.clear(); for (auto& k : kneePk_) k = 0; kneeWin_ = 0; kneeKnown_ = false; measuredKnown_ = false; }
+    static constexpr double kSafeTarget = -13.0, kSafetyRoom = 5.0;
+    void setSafetyHold(bool on) { safetyOn_ = on; }   // for the tests: what happens without it
     void setListening(bool on) { listening_ = on; }
     bool listening() const { return listening_; }
     double peakTpDb() const { return peakTp_; }
@@ -305,7 +313,7 @@ private:
             progMs_ = ms + (progMs_ - ms) * std::pow(tcCoef(3.0, fs_), n);
             lp::CompParams c;
             c.proc = song[dChan] > 0.5f ? 1 : 0;
-            c.threshDb = float(lp::powToDb(progMs_) + 6.0 - v[dGlue] * 0.9);
+            c.threshDb = float(lp::powToDb(progMs_) + 4.0 - v[dGlue] * 1.4);   // at 10: about 6 dB off the loud parts
             static const float attack[5] = {1, 3, 10, 30, 80}, release[4] = {250, 100, 300, 800}, ratio[4] = {1.5f, 2, 3, 4};
             const int rl = clamp(int(v[dRelease] + 0.5f), 0, 3);
             c.ratio = ratio[clamp(int(v[dRatio] + 0.5f), 0, 3)]; c.mix = 1.0f;
@@ -394,24 +402,34 @@ private:
         limInK_.push(L, R, n);
         if (t.playing) feedPass(passIn_, L, R, n, limInBlock_, listening_ ? an_.stats().limIn : nullptr);
         // The limiter's input peaks, for the knee: after CLEAN, TONE, PUNCH and the rest have had their say.
-        if (listening_ && t.playing) {
+        // Every play adds to the running count (so GUARD knows the song after one play); a listening
+        // pass keeps its own too, section by section.
+        if (t.playing) {
             const int win = std::max(1, int(0.01 * fs_));
             auto& st = an_.stats();
             for (int i = 0; i < n; ++i) {
                 limPk_ = std::max(limPk_, double(std::max(std::abs(L[i]), std::abs(R[i]))));
                 if (++limPkN_ >= win) {
                     const int bin = int(clamp((gainToDb(limPk_ + 1e-12) + 70.0) * 2.0, 0.0, double(kPkBins - 1)));
-                    st.limIn[0].pk[bin] += 1; st.limIn[0].windows += 1;
-                    if (curKey_ > 0) { st.limIn[curKey_].pk[bin] += 1; st.limIn[curKey_].windows += 1; }
+                    kneePk_[bin] += 1; kneeWin_ += 1;
+                    if (kneeWin_ > 2e6) { for (auto& k : kneePk_) k *= 0.5; kneeWin_ *= 0.5; }   // older plays fade
+                    if (listening_) {
+                        st.limIn[0].pk[bin] += 1; st.limIn[0].windows += 1;
+                        if (curKey_ > 0) { st.limIn[curKey_].pk[bin] += 1; st.limIn[curKey_].windows += 1; }
+                    }
                     limPk_ = 0; limPkN_ = 0;
                 }
             }
         }
+        // How loud the limiter's input runs over the last few seconds (for the safety hold below).
+        limInSlowDb_ += (limInK_.db - limInSlowDb_) * (1 - std::pow(tcCoef(3.0, fs_), n));
         // The section's own target, if it has one (gliding in with the rest of its settings): a
         // section driven less than the song plays quieter and keeps more of its peaks.
         double target = v[lTarget];
         bool guarding = false;
         if (song[lGuard] > 0.5f && kneeKnown_ && target > knee_) { target = knee_; guarding = true; }
+        // Until it has heard the song, GUARD keeps the target to a safe -13.
+        if (song[lGuard] > 0.5f && !kneeKnown_ && target > kSafeTarget) { target = kSafeTarget; guarding = true; }
         double drive = 0;
         if (measuredKnown_) drive = target - measured_;
         else if (passIn_.seconds > 3) drive = target - passIn_.integrated();
@@ -420,14 +438,25 @@ private:
         // first pass): it learns gently while the song plays.
         if (measuredKnown_ || !t.playing || !driveInit_) { driveNow_ = drive; driveInit_ = true; }
         else driveNow_ += (drive - driveNow_) * 0.001;
-        if (t.playing) { passDriveSum_ += driveNow_; passDriveN_ += 1; }
-        meters_.driveDb.store(float(driveNow_));
+        // The safety hold: no stretch of the song is pushed more than 5 dB past the target. When the
+        // loudness was learnt from part of the song (the quiet intro, say) and a much louder part comes,
+        // this holds the drive back instead of crushing it; with the whole song learnt it rarely moves.
+        {
+            double want = 0;
+            if (safetyOn_ && limInSlowDb_ > -50) want = std::min(0.0, target + kSafetyRoom - (limInSlowDb_ + driveNow_));
+            const double tc = want < safety_ ? 0.8 : 4.0;
+            safety_ += (want - safety_) * (1 - std::pow(tcCoef(tc, fs_), n));
+        }
+        driveEff_ = driveNow_ + safety_;
+        if (t.playing) { passDriveSum_ += driveEff_; passDriveN_ += 1; }
+        meters_.driveDb.store(float(driveEff_));
+        meters_.safetyDb.store(float(safety_));
         meters_.guarding.store(guarding);
         meters_.learning.store(!measuredKnown_);
         {
             lp::LimParams lpm;
             const bool on = song[loudIn] > 0.5f;
-            lpm.gainDb = on ? float(driveNow_) : 0.0f;
+            lpm.gainDb = on ? float(driveEff_) : 0.0f;
             lpm.ceilingDb = on ? song[lCeiling] : 0.0f;
             lpm.clip = on && song[lClip] > 0.05f ? 1.0f : 0.0f;
             lpm.clipAmt = song[lClip] / 10.0f;
@@ -514,16 +543,16 @@ private:
                 if (++b.qi >= 4) {
                     const double ms = 0.25 * (b.q[0] + b.q[1] + b.q[2] + b.q[3]);
                     const double lu = -0.691 + 10 * std::log10(ms + 1e-20);
-                    if (stream == 0 && barIdx_ >= 0) { barOutPw_ += ms; barDrive_ += driveNow_; ++barOutN_; }
+                    if (stream == 0 && barIdx_ >= 0) { barOutPw_ += ms; barDrive_ += driveEff_; ++barOutN_; }
                     if (stream == 1 && barIdx_ >= 0) { barMixPw_ += ms; ++barMixN_; }
                     if (stream == 1) { b.sub = 0; b.n = 0; continue; }   // the mix only feeds the bar map
                     ks.blocks.push_back(lu);
-                    ks.aux.push_back(driveNow_);
+                    ks.aux.push_back(driveEff_);
                     ks.seconds += 0.1;
                     if (perKey) {   // the listening pass: the song, and the section it's in
                         for (KeyStats* k : {&perKey[0], curKey_ > 0 ? &perKey[curKey_] : nullptr}) {
                             if (!k) continue;
-                            k->blocks.push_back(lu); k->aux.push_back(driveNow_); k->seconds += 0.1;
+                            k->blocks.push_back(lu); k->aux.push_back(driveEff_); k->seconds += 0.1;
                         }
                     }
                 }
@@ -581,6 +610,8 @@ private:
     KeyStats passMix_;
     BlockAcc mixBlock_;
     int barIdx_ = -1, barOutN_ = 0, barMixN_ = 0, limPkN_ = 0;
+    double kneePk_[kPkBins]{}, kneeWin_ = 0, limInSlowDb_ = -70, safety_ = 0, driveEff_ = 0;
+    bool safetyOn_ = true;
     double limPk_ = 0;
     double barOutPw_ = 0, barMixPw_ = 0, barDrive_ = 0;
     double contrib_[kProbes]{};
@@ -591,8 +622,10 @@ private:
     BlockAcc limInBlock_, outBlock_;
     Ramp monR_, compR_;
     double progMs_ = 1e-4;
-    double measured_ = -14, knee_ = -6, driveNow_ = 0, peakTp_ = -120, stPk_ = 0, glideStartPpq_ = -1, glideT_ = 1;
-    bool measuredKnown_ = false, kneeKnown_ = false, listening_ = false, driveInit_ = false;
+    std::atomic<double> knee_{-6};
+    std::atomic<bool> kneeKnown_{false};
+    double measured_ = -14, driveNow_ = 0, peakTp_ = -120, stPk_ = 0, glideStartPpq_ = -1, glideT_ = 1;
+    bool measuredKnown_ = false, listening_ = false, driveInit_ = false;
     int fill_ = 0, prevKey_ = 0, curKey_ = 0, glideFrom_ = 0, pkN_ = 0;
     double pkWin_ = 0, passDriveSum_ = 0, passDriveN_ = 0;
     float inBuf_[2][kSub]{}, outBuf_[2][kSub]{};

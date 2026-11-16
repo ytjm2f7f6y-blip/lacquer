@@ -43,6 +43,7 @@ public:
     void tick(int frames = 1);
     void showHelp(const char* id) { hoverId_ = id; }
     void pickBlock(int i) { selMark_ = i; }
+    void pressForTests(int controlIndex) { pressed_ = controlIndex; }
     void showBubble(int controlIndex) { bubble_ = controlIndex; bubbleUntil_ = clock_ + 60.0; }
 
     static constexpr float kHelpH = 80.0f;

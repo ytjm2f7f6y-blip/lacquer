@@ -387,6 +387,63 @@ int main() {
         check(cov3 > 0.15 && cov3 < 0.35, "a loop on its own says how little of the song it is", num(cov3 * 100, 0) + "% of the song heard");
     }
 
+    // ---- not crushing a song learnt from its quiet start: the safety hold
+    {
+        // A full-level song whose intro is 26 dB under the rest.
+        auto q = songOf(1.0);
+        for (size_t i = 0; i < size_t(4 * kFs); ++i) { q.L[i] *= 0.05f; q.R[i] *= 0.05f; }
+        auto runOnce = [&](bool hold) {
+        auto e = engine();
+        Values w = v;
+        w[lTarget] = -10.0f; w[lGuard] = 0.0f;
+        lq::Transport t;
+        t.playing = true; t.hasPpq = true; t.bpm = s.bpm;
+        auto play = [&](size_t from, size_t to, std::vector<float>* outL = nullptr) {
+            std::vector<float> L(q.L.begin() + long(from), q.L.begin() + long(to)), R(q.R.begin() + long(from), q.R.begin() + long(to));
+            for (size_t i = 0; i < L.size(); i += 512) {
+                const int n = int(std::min<size_t>(512, L.size() - i));
+                t.ppq = double(from + i) / kFs * s.bpm / 60.0;
+                e->process(L.data() + i, R.data() + i, n, w, t);
+            }
+            if (outL) *outL = L;
+            lq::Transport stop;
+            float z[64] = {}, z2[64] = {};
+            e->process(z, z2, 64, w, stop);
+            return L;
+        };
+        // Only the quiet intro, then calibrated from it alone: the whole song now looks quiet.
+        play(0, size_t(4 * kFs));
+        double m = 0, cov = 0;
+        lq::loudnessFromBars(e->bars(), 2, m, cov);
+        e->setMeasuredInput(m, true);
+        e->setSafetyHold(hold);
+        std::vector<float> outL;
+        play(0, q.L.size(), &outL);
+        // How hard the limiter works on the choruses.
+        double gr = 0;
+        float z[512] = {}, z2[512] = {};
+        (void)z; (void)z2;
+        std::vector<float> l(outL.begin() + long(13 * kFs), outL.begin() + long(19.5 * kFs)), r = l;
+        gr = lufs(l, r) - 3.01;   // one channel, as if both
+        double pk = 0;
+        for (float x : l) pk = std::max(pk, double(std::abs(x)));
+        return std::make_pair(gr, lq::gainToDb(pk) - gr);   // loudness, and peak-to-loudness (how much punch is left)
+        };
+        const auto with = runOnce(true), without = runOnce(false);
+        check(with.second > without.second + 3.0 && std::abs(with.first + 10.0) < 1.5, "a song learnt from its quiet intro isn't crushed when the loud part comes",
+              "the chorus at " + num(with.first, 1) + " LUFS with " + num(with.second, 1) + " dB of punch left; without the hold " + num(without.first, 1) + " LUFS and " +
+              num(without.second, 1) + " dB");
+    }
+    {   // GUARD keeps the target to -13 until it has heard the song.
+        auto e = engine();
+        Values w = v;
+        w[lTarget] = -8.0f; w[lGuard] = 1.0f;
+        e->setMeasuredInput(lufs(s.L, s.R), true);
+        const Run r = run(*e, s, w, 512);
+        const double got = lufs(r.L, r.R, size_t(2 * kFs));
+        check(e->meters().guarding.load() && got < -11.5, "before it knows the song, GUARD holds the target at -13", num(got, 1) + " LUFS for a target of -8");
+    }
+
     // ---- the hidden space
     {
         auto a = engine(), b = engine();

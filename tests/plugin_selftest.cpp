@@ -4,6 +4,7 @@
 #include "testsig.hpp"
 
 #include <cstdio>
+#include <cstring>
 
 static int fails = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { ++fails; std::printf("FAIL: %s\n", msg); } else std::printf("ok:   %s\n", msg); } while (0)
@@ -282,6 +283,29 @@ int main() {
                 for (int pg = 0; pg < 6; ++pg) { p.page = pg; for (int tab = 0; tab < 4; ++tab) { p.detailTab = tab; if (pg != 5 && tab > 0) break; auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f); windowOk = windowOk && img.isValid(); } }
             }
         CHECK(windowOk, "the window draws every screen page (and every DETAIL tab) at 75, 100 and 150%, with the tray in and out");
+        // A key held down must not fade the knobs drawn after it (images take the context's opacity).
+        {
+            p.uiScale = 1.0f; p.trayOpen = false; p.page = 0;
+            std::unique_ptr<juce::AudioProcessorEditor> ed(p.createEditor());
+            auto* le = dynamic_cast<LacquerEditor*>(ed.get());
+            int key = -1, knob = -1;
+            for (int i = 0; i < layout::kNumControls; ++i) {
+                if (key < 0 && std::strcmp(layout::kControls[i].id, "key_bal") == 0) key = i;
+                if (std::strcmp(layout::kControls[i].id, "c_drive") == 0) knob = i;
+            }
+            const auto& c = layout::kControls[knob];
+            // The whole window, as a full repaint draws it (the key first, the knob later).
+            const auto a = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f);
+            le->pressForTests(key);
+            const auto b = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f);
+            double diff = 0;
+            for (int y = int(c.y) - 20; y < int(c.y) + 20; ++y)
+                for (int x = int(c.x) - 20; x < int(c.x) + 20; ++x) {
+                    const auto pa = a.getPixelAt(x, y), pb = b.getPixelAt(x, y);
+                    diff = std::max(diff, double(std::abs(pa.getBrightness() - pb.getBrightness())));
+                }
+            CHECK(diff < 0.02, "a key held down doesn't fade the knobs (the greying)");
+        }
     }
 
     // ---- block sizes, mono, offline

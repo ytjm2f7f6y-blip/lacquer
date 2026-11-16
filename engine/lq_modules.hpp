@@ -102,7 +102,7 @@ public:
             const double rel = hFast_.push(hb * hb) - wide;
             const double usual = hSlow_.push(std::pow(10.0, rel / 10.0));
             const double over = rel - usual - (6.0 - 4.0 * harshDepth);
-            const double hg = over > 0 ? dbToGain(-std::min(6.0 * harshDepth + 0.5, over * (0.4 + 0.5 * harshDepth))) : 1.0;
+            const double hg = over > 0 ? dbToGain(-std::min(10.0 * harshDepth + 0.5, over * (0.4 + 0.6 * harshDepth))) : 1.0;
             hGain_ = hg + (hGain_ - hg) * gSmooth_;
             // Resonances: a band standing above its neighbours, against how it usually stands.
             double lev[kBands];
@@ -113,7 +113,7 @@ public:
                     const double stand = lev[b] - nb;
                     const double usualStand = 10 * std::log10(slow_[b].push(std::pow(10.0, clamp(stand, -40.0, 40.0) / 10.0)) + 1e-20);
                     const double ex = stand - std::max(usualStand, 0.0) - (5.0 - 3.0 * resDepth);
-                    const double g = ex > 0 ? dbToGain(-std::min(6.0 * resDepth, ex * 0.6 * resDepth + 0.2)) : 1.0;
+                    const double g = ex > 0 ? dbToGain(-std::min(10.0 * resDepth, ex * 0.8 * resDepth + 0.2)) : 1.0;
                     gain_[b] = g + (gain_[b] - g) * gSmooth_;
                 }
             }
@@ -276,7 +276,7 @@ public:
             const double m = std::max(std::abs(L[i]), std::abs(R[i]));
             const double f = fast_.push(m * m), s = slow_.push(m * m);
             const double tr = clamp(f - s, 0.0, 12.0);
-            const double gdb = clamp(a[i] * 0.22 * tr, -6.0, 6.0);
+            const double gdb = clamp(a[i] * 0.32 * tr, -9.0, 9.0);
             g_ = gdb + (g_ - gdb) * k_;
             const double g = dbToGain(g_);
             L[i] = float(L[i] * g);
@@ -330,7 +330,7 @@ public:
             const double ts = all_.push(tot), tl = allLong_.push(tot);
             for (int b = 0; b < 3; ++b) {
                 const double dev = (rel_[b][0] - ts) - (rel_[b][1] - tl);
-                const double gdb = clamp(-dev * 0.6 * a[i], -4.0, 4.0);
+                const double gdb = clamp(-dev * 0.8 * a[i], -8.0, 8.0);
                 g_[b] = gdb + (g_[b] - gdb) * k_;
             }
             for (int c = 0; c < 2; ++c) {

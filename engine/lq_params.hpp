@@ -67,21 +67,21 @@ inline const ParamDef* paramTable() {
         {cHear, "c_hear", "clean hear", kBool, 0, 1, 0, 0, "result|removed", "", false, gStep},
 
         {toneIn, "tone_in", "tone in", kBool, 0, 1, 1, 0, nullptr, "", true, gBlend},
-        {tLow, "t_low", "low", kLin, -6, 6, 0, 0, nullptr, "dB", true, gLin},
-        {tPres, "t_pres", "presence", kLin, -6, 6, -0.8f, 0, nullptr, "dB", true, gLin},
-        {tAir, "t_air", "air", kLin, -6, 6, 1.5f, 0, nullptr, "dB", true, gLin},
+        {tLow, "t_low", "low", kLin, -12, 12, 0, 0, nullptr, "dB", true, gLin},
+        {tPres, "t_pres", "presence", kLin, -12, 12, 0, 0, nullptr, "dB", true, gLin},
+        {tAir, "t_air", "air", kLin, -12, 12, 1.0f, 0, nullptr, "dB", true, gLin},
         {tMode, "t_mode", "tone mode", kBool, 0, 1, 1, 0, "static|dynamic", "", true, gBlend},
 
         {dynIn, "dyn_in", "dynamics in", kBool, 0, 1, 1, 0, nullptr, "", true, gBlend},
-        {dGlue, "d_glue", "glue", kLin, 0, 10, 4, 0, nullptr, "", true, gLin},
-        {dPunch, "d_punch", "punch", kLin, -5, 5, 1, 0, nullptr, "", true, gLin},
+        {dGlue, "d_glue", "glue", kLin, 0, 10, 3, 0, nullptr, "", true, gLin},
+        {dPunch, "d_punch", "punch", kLin, -5, 5, 0.5f, 0, nullptr, "", true, gLin},
         {dEven, "d_even", "even", kLin, 0, 10, 2, 0, nullptr, "", true, gLin},
         {dChan, "d_chan", "channels", kBool, 0, 1, 0, 0, "l / r|m / s", "", false, gStep},
 
         {colIn, "col_in", "colour in", kBool, 0, 1, 1, 0, nullptr, "", true, gBlend},
-        {cDrive, "c_drive", "drive", kLin, 0, 10, 3, 0, nullptr, "", true, gLin},
+        {cDrive, "c_drive", "drive", kLin, 0, 10, 2, 0, nullptr, "", true, gLin},
         {cShade, "c_shade", "shade", kLin, 0, 10, 4.5f, 0, nullptr, "", true, gLin},
-        {cMix, "c_mix", "mix", kLin, 0, 100, 60, 0, nullptr, "%", true, gLin},
+        {cMix, "c_mix", "mix", kLin, 0, 100, 50, 0, nullptr, "%", true, gLin},
         {cType, "c_type", "type", kChoice, 0, 2, 0, 3, "tape|iron|valve", "", true, gBlend},
 
         {stIn, "st_in", "stereo in", kBool, 0, 1, 0, 0, nullptr, "", true, gBlend},
@@ -90,7 +90,7 @@ inline const ParamDef* paramTable() {
         {sCentre, "s_centre", "centre", kLin, -3, 3, 0, 0, nullptr, "dB", true, gLin},
         {sHear, "s_hear", "stereo hear", kBool, 0, 1, 0, 0, "stereo|mono", "", false, gStep},
 
-        {spIn, "sp_in", "space in", kBool, 0, 1, 1, 0, nullptr, "", true, gBlend},
+        {spIn, "sp_in", "space in", kBool, 0, 1, 0, 0, nullptr, "", true, gBlend},
         {spType, "sp_type", "space type", kChoice, 0, 5, 2, 6, "clean|studio|plate|spring|chamber|room", "", true, gStep},
         {spAmount, "sp_amount", "space amount", kLin, -60, -15, -32, 0, nullptr, "dB", true, gLin},
         {spDecay, "sp_decay", "decay", kLog, 0.3f, 2.5f, 1.4f, 0, nullptr, "s", true, gLog},
@@ -104,9 +104,9 @@ inline const ParamDef* paramTable() {
         {spB, "sp_b", "space b", kLin, 0, 10, 6, 0, nullptr, "", true, gLin},
 
         {loudIn, "loud_in", "loudness in", kBool, 0, 1, 1, 0, nullptr, "", false, gBlend},
-        {lTarget, "l_target", "target", kLin, -16, -6, -9.4f, 0, nullptr, "LUFS", true, gLin},
+        {lTarget, "l_target", "target", kLin, -16, -6, -13.0f, 0, nullptr, "LUFS", true, gLin},
         {lCeiling, "l_ceiling", "ceiling", kLin, -2, 0, -1, 0, nullptr, "dBTP", false, gLin},
-        {lClip, "l_clip", "clipper", kLin, 0, 10, 3, 0, nullptr, "", false, gLin},
+        {lClip, "l_clip", "clipper", kLin, 0, 10, 1, 0, nullptr, "", false, gLin},
         {lGuard, "l_guard", "guard", kBool, 0, 1, 1, 0, nullptr, "", false, gStep},
 
         {oListen, "o_listen", "listen on", kChoice, 0, 4, 0, 5, "desk|phone|buds|car|club", "", false, gStep},
@@ -115,7 +115,7 @@ inline const ParamDef* paramTable() {
         {oMonitor, "o_monitor", "monitor", kLin, -30, 0, 0, 0, nullptr, "dB", false, gLin},
         {oMatch, "o_match", "matched", kBool, 0, 1, 1, 0, nullptr, "", false, gStep},
 
-        {tMud, "t_mud", "mud", kLin, -6, 6, 0, 0, nullptr, "dB", true, gLin},
+        {tMud, "t_mud", "mud", kLin, -12, 12, 0, 0, nullptr, "dB", true, gLin},
         {tLowHz, "t_low_hz", "low freq", kLog, 40, 250, 110, 0, nullptr, "Hz", true, gLog},
         {tMudHz, "t_mud_hz", "mud freq", kLog, 120, 800, 300, 0, nullptr, "Hz", true, gLog},
         {tPresHz, "t_pres_hz", "presence freq", kLog, 1000, 6000, 2500, 0, nullptr, "Hz", true, gLog},

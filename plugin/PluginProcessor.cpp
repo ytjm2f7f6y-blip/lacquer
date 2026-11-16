@@ -186,11 +186,15 @@ void LacquerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
             engine_.setMeasuredInput(m, true);
             coverage_.store(cov);
         } else if (playedSeconds_ >= 20.0) {
-            engine_.setMeasuredInput(engine_.calibratedInput(), true);
+            m = engine_.calibratedInput();
+            engine_.setMeasuredInput(m, true);
             coverage_.store(-1);
         } else {
             return;
         }
+        // GUARD's knee, from every 10 ms peak the limiter's input has seen.
+        const lq::Knee kn = lq::kneeFromPeaks(engine_.kneePeaks(), engine_.kneeWindows(), m, songValue(lCeiling), songValue(lClip));
+        if (kn.known) engine_.setKnee(kn.kneeLufs, true);
         calibrated_.store(true);
     };
     bool endPassNow = false;
@@ -231,7 +235,7 @@ int LacquerProcessor::songBars() const {
 }
 
 void LacquerProcessor::forgetLoudness() {
-    engine_.bars().clear();
+    engine_.forgetSong();
     engine_.setMeasuredInput(-14.0, false);
     coverage_.store(-1);
     maxPpq_.store(0);

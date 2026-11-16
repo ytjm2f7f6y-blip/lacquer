@@ -148,7 +148,9 @@ public:
     double sampleRate() const { return sampleRate_; }
     void resetIntegrated() { resetPass_.store(true); }
     bool loudnessKnown() const { return engine_.measuredKnown(); }
-    double coverage() const { return coverage_.load(); }   // how much of the song the loudness rests on (-1: unknown)
+    double coverage() const { return coverage_.load(); }
+    bool kneeKnown() const { return engine_.kneeKnown(); }
+    double kneeLufs() const { return engine_.kneeLufs(); }   // how much of the song the loudness rests on (-1: unknown)
     int songBars() const;
     const lq::BarLevels& bars() const { return engine_.bars(); }
     void forgetLoudness();                            // a new mix: learn it from scratch

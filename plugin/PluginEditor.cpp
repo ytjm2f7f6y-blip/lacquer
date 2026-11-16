@@ -985,7 +985,7 @@ constexpr float kTabY0 = 44, kTabY1 = 57;
 float tabX0(int t) { return 12.0f + t * 90.0f; }
 float tabX1(int t) { return tabX0(t) + 84.0f; }
 // The EQ graph.
-constexpr float kEqY0 = 64, kEqY1 = 156, kEqMid = 110, kEqPerDb = 5.5f;
+constexpr float kEqY0 = 64, kEqY1 = 156, kEqMid = 110, kEqPerDb = 3.6f;   // +-12 dB
 float eqX(double f) { return float(8 + 364 * std::log(f / 20.0) / std::log(1000.0)); }
 double eqF(float x) { return 20.0 * std::pow(1000.0, (x - 8) / 364.0); }
 float eqY(double db) { return float(kEqMid - db * kEqPerDb); }
@@ -1071,7 +1071,7 @@ void LacquerEditor::drawDetail(juce::Graphics& g) {
         for (int p = 0; p < lq::kNumParams; ++p) v[p] = proc_.shownValue(p);
         lq::ToneParams tp = lq::Engine::toneParamsFrom(v);
         tp.weight = 1;
-        for (int db : {-6, 0, 6}) {
+        for (int db : {-12, -6, 0, 6, 12}) {
             juce::Path gl; gl.startNewSubPath(ink.p(8, eqY(db))); gl.lineTo(ink.p(372, eqY(db)));
             ink.dashed(gl, 2, 3, 0.7f, kText.withAlpha(db == 0 ? 0.45f : 0.22f));
             ink.text((db > 0 ? "+" : db < 0 ? kMinus : "") + juce::String(std::abs(db)), 14, eqY(db) - 2, 9.5f, 0, 0.5f);
@@ -1233,7 +1233,7 @@ void LacquerEditor::detailDrag(juce::Point<float> pt, const juce::MouseEvent& e)
     float db = float((kEqMid - y) / kEqPerDb);
     if (e.mods.isShiftDown()) db = std::round(db * 2) / 2;
     proc_.setShown(kBandHz[b], hz);
-    proc_.setShown(kBandDb[b], juce::jlimit(-6.0f, 6.0f, db));
+    proc_.setShown(kBandDb[b], juce::jlimit(-12.0f, 12.0f, db));
     repaint();
 }
 
@@ -1344,6 +1344,7 @@ void LacquerEditor::drawBubble(juce::Graphics& g) {
 // Drawing
 void LacquerEditor::drawSprite(juce::Graphics& g, const juce::Image& im, float cx, float cyy, float wPt, float hPt, int frame, int frames) {
     if (!im.isValid()) return;
+    g.setOpacity(1.0f);   // images take the context's opacity: never let an earlier shade fade them
     const int fh = im.getHeight() / std::max(1, frames);
     g.drawImage(im, int(std::round((cx - wPt / 2) * s_)), int(std::round((cyy - hPt / 2) * s_)), int(std::round(wPt * s_)), int(std::round(hPt * s_)),
                 0, frame * fh, im.getWidth(), fh);
@@ -1357,6 +1358,7 @@ void LacquerEditor::drawLit(juce::Graphics& g, int ci) {
     const float* gr = kLitGroupRect[c.litGroup];
     const int S = kArtScale;
     const float oy = c.tray ? H : 0.0f;
+    g.setOpacity(1.0f);
     g.drawImage(from, int(std::round(c.lx * s_)), int(std::round((c.ly + oy) * s_)), int(std::round(c.lw * s_)), int(std::round(c.lh * s_)),
                 int((c.lx - gr[0]) * S), int((c.ly - gr[1]) * S), int(c.lw * S), int(c.lh * S));
 }
@@ -1364,6 +1366,7 @@ void LacquerEditor::drawLit(juce::Graphics& g, int ci) {
 void LacquerEditor::paint(juce::Graphics& g) {
     g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
     const auto clip = g.getClipBounds().toFloat() / s_;
+    g.setOpacity(1.0f);
     if (art_->panel.isValid()) g.drawImage(art_->panel, juce::Rectangle<float>(0, 0, W, H) * s_);
     else g.fillAll(juce::Colour(0xff8a8a86));
     if (proc_.trayOpen) {
@@ -1381,6 +1384,7 @@ void LacquerEditor::paint(juce::Graphics& g) {
             case Lamp:
                 if (lit(i)) drawLit(g, i);
                 if (pressed_ == i) {
+                    juce::Graphics::ScopedSaveState keep(g);
                     g.setColour(juce::Colours::black.withAlpha(0.2f));
                     g.fillRoundedRectangle(juce::Rectangle<float>(c.x - c.w / 2 + 2, cy(c) - c.h / 2 + 2, c.w - 4, c.h - 4) * s_, 2 * s_);
                 }

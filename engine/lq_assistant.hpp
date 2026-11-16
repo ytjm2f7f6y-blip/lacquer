@@ -185,10 +185,10 @@ inline Contrast contrastFrom(const SongStats& st) {
 
 // The loudness knee: how much of the drums' snap survives as the drive goes up, from the
 // histogram of 10 ms peaks. A window loses what the limiter takes off it past the first dB.
-inline Knee kneeFrom(const KeyStats& song, double ceilingDb, double clip) {
+inline Knee kneeFromPeaks(const double* pk, double windows, double inputLufs, double ceilingDb, double clip) {
     Knee k;
-    if (song.windows < 50) return k;
-    k.inputLufs = song.integrated();
+    if (windows < 50) return k;
+    k.inputLufs = inputLufs;
     const double clipHelp = clip / 10.0 * 1.5;   // the clipper takes the sharpest peaks off cleanly
     double kneeAt = -6;
     bool found = false;
@@ -196,18 +196,21 @@ inline Knee kneeFrom(const KeyStats& song, double ceilingDb, double clip) {
         const double L = -16 + i * 0.1, drive = L - k.inputLufs;
         double ex = 0;
         for (int b = 0; b < kPkBins; ++b) {
-            if (song.pk[b] <= 0) continue;
-            const double pk = -70 + b * 0.5 + 0.25;
-            const double gr = std::max(0.0, pk + drive - ceilingDb - clipHelp);
-            ex += song.pk[b] * std::max(0.0, gr - 1.0);
+            if (pk[b] <= 0) continue;
+            const double p = -70 + b * 0.5 + 0.25;
+            const double gr = std::max(0.0, p + drive - ceilingDb - clipHelp);
+            ex += pk[b] * std::max(0.0, gr - 1.0);
         }
-        ex /= song.windows;
+        ex /= windows;
         k.kept[i] = clamp(100.0 - 14.0 * ex, 30.0, 100.0);
         if (!found && ex > 0.45) { kneeAt = L; found = true; }
     }
     k.kneeLufs = found ? kneeAt : -6;
     k.known = true;
     return k;
+}
+inline Knee kneeFrom(const KeyStats& song, double ceilingDb, double clip) {
+    return kneeFromPeaks(song.pk, song.windows, song.integrated(), ceilingDb, clip);
 }
 
 // What each destination usually asks for. Streaming services turn anything louder than about -14
