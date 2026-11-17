@@ -2,8 +2,9 @@
 // The assistant: from a listening pass to targets, suggested moves, the loudness knee and the
 // checks. Runs on the message thread, after the pass.
 //
-// The genre curves are starting points worked out from how finished masters in each style tend to
-// sit against pink noise. They are meant to be tuned by ear, and REFS or MINE replace them.
+// The genre curves start from the average balance of released records, measured with this
+// analyser (see kRecords below), bent a little for each style. They are starting points, meant to
+// be tuned by ear, and REFS or MINE replace them.
 
 #include "lq_analysis.hpp"
 
@@ -22,36 +23,76 @@ struct Target {
     std::string name = "indie rock";
 };
 
-struct GenreShape { const char* name; double lowDb, lowHz, lowMidDb, presDb, airDb, airHz; };
+// How released records sit, on average: twelve commercially released, professionally mixed and
+// mastered songs (indie, rock, metal, pop, R&B, electronic, hip-hop, acoustic) measured with this
+// analyser, then smoothed. Against pink noise they fall about 1.5 dB an octave from 100 Hz to 4 kHz
+// and faster above that, the shape Pestana et al. (AES 2013) found across commercial records from
+// 1950 to 2010: a severe roll-off under about 40 Hz, a lift around the kick and bass, and a top end
+// well under the mids. (A flat target here would ask every good record for more top.)
+struct CurvePoint { double hz, db; };
+inline const CurvePoint* recordsCurve(int& n) {
+    static const CurvePoint c[] = {{20, -20.0}, {25, -14.0}, {31.5, -8.5}, {40, -3.0}, {50, 1.5}, {63, 3.6}, {80, 4.0},
+                                   {100, 3.5}, {125, 2.9}, {160, 2.0}, {200, 1.5}, {250, 1.2}, {315, 0.8}, {400, 0.8},
+                                   {500, 0.4}, {630, 0.4}, {800, -0.2}, {1000, -0.7}, {1250, -1.0}, {1600, -1.3},
+                                   {2000, -1.6}, {2500, -2.2}, {3150, -3.2}, {4000, -4.4}, {5000, -5.6}, {6300, -6.3},
+                                   {8000, -6.9}, {10000, -8.1}, {12500, -9.7}, {16000, -12.5}, {20000, -18.0}};
+    n = int(sizeof(c) / sizeof(c[0]));
+    return c;
+}
+// How far good records spread either side of it (about one standard deviation of the same twelve,
+// band by band): inside this, a balance is a matter of taste, not a fault.
+inline const CurvePoint* recordsSpread(int& n) {
+    static const CurvePoint c[] = {{20, 7.0}, {31.5, 5.0}, {45, 3.0}, {63, 2.2}, {160, 2.0}, {1000, 2.0},
+                                   {2000, 2.3}, {4000, 2.6}, {8000, 3.2}, {16000, 4.5}, {22000, 6.0}};
+    n = int(sizeof(c) / sizeof(c[0]));
+    return c;
+}
+inline double curveAt(const CurvePoint* c, int n, double f) {
+    if (f <= c[0].hz) return c[0].db;
+    for (int i = 1; i < n; ++i)
+        if (f <= c[i].hz) {
+            const double t = std::log2(f / c[i - 1].hz) / std::log2(c[i].hz / c[i - 1].hz);
+            return c[i - 1].db + t * (c[i].db - c[i - 1].db);
+        }
+    return c[n - 1].db;
+}
+
+// Each style against that average: more or less low end (a bell at lowHz), low-mids, presence, and
+// top (a tilt from 2 kHz, all of it by 16 kHz). Records with more percussion carry more low end and
+// more top (Elowsson and Friberg, AES 2017); quieter, acoustic styles carry less of both.
+struct GenreShape { const char* name; double lowDb, lowHz, lowMidDb, presDb, topDb; };
 inline const GenreShape* genres(int& n) {
     static const GenreShape g[] = {
-        {"indie rock", 2.0, 70, 0.3, 0.0, -2.6, 9000},
-        {"pop", 2.6, 60, -0.4, 0.6, -1.6, 10000},
-        {"hip-hop", 4.5, 55, -0.6, 0.0, -2.2, 9500},
-        {"electronic", 4.0, 50, -0.8, 0.2, -1.4, 11000},
-        {"acoustic", 0.8, 90, 0.4, 0.2, -3.0, 8500},
-        {"jazz", 0.6, 100, 0.6, -0.3, -3.4, 8000},
+        {"indie rock", 0.0, 70, 0.3, 0.3, 0.0},
+        {"pop", 0.5, 60, -0.4, 0.6, 1.0},
+        {"hip-hop", 2.0, 55, -0.5, -0.3, 0.5},
+        {"electronic", 1.5, 50, -0.8, 0.0, 1.5},
+        {"acoustic", -1.5, 70, 1.2, -1.5, -2.0},
+        {"jazz", -2.0, 80, 1.0, -1.0, -2.5},
     };
     n = int(sizeof(g) / sizeof(g[0]));
     return g;
 }
 
+constexpr double kLowSideMax = -12.0;   // side against mid under 100 Hz, dB
+
 inline Target genreTarget(int i) {
-    int n = 0;
+    int n = 0, nc = 0, ns = 0;
     const auto* g = genres(n);
+    const auto* rc = recordsCurve(nc);
+    const auto* rs = recordsSpread(ns);
     const auto& s = g[std::max(0, std::min(i, n - 1))];
     Target t;
     t.name = s.name;
     for (int b = 0; b < kBands; ++b) {
-        const double f = bandCentre(b), o = std::log2(f / 1000.0);
-        double c = s.lowDb * std::exp(-std::pow(std::log2(f / s.lowHz) / 1.4, 2));
+        const double f = bandCentre(b);
+        double c = curveAt(rc, nc, f);
+        c += s.lowDb * std::exp(-std::pow(std::log2(f / s.lowHz) / 1.4, 2));
         c += s.lowMidDb * std::exp(-std::pow(std::log2(f / 350.0) / 1.0, 2));
         c += s.presDb * std::exp(-std::pow(std::log2(f / 2800.0) / 1.0, 2));
-        c += s.airDb * std::max(0.0, std::log2(f / s.airHz)) / 1.0;
-        if (f < 40) c -= 3.0 * std::log2(40.0 / f) * 1.4;                  // masters roll off under the kick
-        if (f > 16000) c -= 4.0 * std::log2(f / 16000.0);
+        c += s.topDb * clamp(std::log2(f / 2000.0) / 3.0, 0.0, 1.0);
         t.curve[b] = c;
-        t.width[b] = 1.3 + 0.7 * std::min(1.0, std::pow(std::abs(o + 0.5) / 5.0, 2));
+        t.width[b] = curveAt(rs, ns, f);
     }
     // The curve's own 200 Hz-2 kHz average at 0, like the measured ones.
     double ref = 0; int k = 0;
@@ -229,7 +270,27 @@ struct Result {
     std::vector<Check> checks;
     std::vector<std::string> mixNotes;
     Contrast contrast;   // the loudest section against the others, in the mix and after the limiter
+    double peakPile = 0;  // the share of the loud 10 ms windows peaking within 2 dB of the top
 };
+
+// How much of the song's loud stretches peak just under its loudest peaks (the top 0.1% of windows
+// set the top): near 0 for an unlimited mix, a large share for one that went through a limiter.
+inline double peakPile(const KeyStats& k) {
+    double total = 0;
+    int top = -1;
+    for (int b = kPkBins - 1; b >= 0; --b) { total += k.pk[b]; if (top < 0 && k.pk[b] > 0) top = b; }
+    if (top < 0 || total < 100) return 0;
+    double cum = 0;
+    int p999 = top;
+    for (int b = top; b >= 0; --b) { cum += k.pk[b]; if (cum >= 0.001 * total) { p999 = b; break; } }
+    double loud = 0, near = 0;
+    for (int b = 0; b < kPkBins; ++b) {
+        if (b < top - 60) continue;                      // within 30 dB of the loudest
+        loud += k.pk[b];
+        if (b >= p999 - 4) near += k.pk[b];              // within 2 dB of the top
+    }
+    return loud > 0 ? near / loud : 0;
+}
 
 // From the pass and the target to moves, checks and notes.
 inline Result assist(const SongStats& st, const Target& tgt, const Values& song, const Values* sectionVals /* [kNumKeys] */,
@@ -247,7 +308,7 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
         double lowM = 0, lowS = 0, m = 0, s = 0;
         for (int b = 0; b < kBands; ++b) {
             m += st.key[k].mid[b]; s += st.key[k].side[b];
-            if (bandCentre(b) < 150) { lowM += st.key[k].mid[b]; lowS += st.key[k].side[b]; }
+            if (bandCentre(b) < 100) { lowM += st.key[k].mid[b]; lowS += st.key[k].side[b]; }   // kick and bass
         }
         r.sideLowDb[k] = 10 * std::log10((lowS + 1e-20) / (lowM + 1e-20));
         r.widthDb[k] = 10 * std::log10((s + 1e-20) / (m + 1e-20));
@@ -276,7 +337,8 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
                             {tPres, mkPres, 1600, 4000, "PRESENCE", "2 to 4 kHz is a touch forward.", "The upper mids sit back."},
                             {tAir, mkAir, 8000, 16000, "AIR", "The top end sits above the target.", "The top end sits under the target."}};
     for (const auto& b : tb) {
-        const double dev = avgDev(0, b.f0, b.f1), room = avgWidth(b.f0, b.f1) * 0.7;
+        // Inside the corridor is taste; a move only once the band's average leaves it.
+        const double dev = avgDev(0, b.f0, b.f1), room = avgWidth(b.f0, b.f1), sectRoom = 0.5 * room + 0.4;
         if (std::abs(dev) > room) {
             Move m; m.key = 0; m.param = b.param; m.kind = b.kind; m.module = "TONE";
             m.full = float(clamp(-dev * 0.9, -3.0, 3.0));
@@ -285,7 +347,7 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
             m.why = dev > 0 ? b.hi : b.lo;
             m.conf = confFor(dev, room, b.kind);
             add(m);
-            if (std::abs(dev) > 4.5) r.mixNotes.push_back(std::string(b.name == std::string("LOW") ? "The low end" : b.name == std::string("AIR") ? "The top end" : b.name == std::string("MUD") ? "The low-mids" : "The upper mids") +
+            if (std::abs(dev) > room + 3.0) r.mixNotes.push_back(std::string(b.name == std::string("LOW") ? "The low end" : b.name == std::string("AIR") ? "The top end" : b.name == std::string("MUD") ? "The low-mids" : "The upper mids") +
                                                           " is " + fmt1(std::abs(dev)) + " dB " + (dev > 0 ? "over" : "under") + " the target. Fix the bulk of it in the mix.");
         }
         // A section that stands apart from the song gets its own move: the two that stand out most
@@ -295,7 +357,7 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
         for (int k = 1; k < kNumKeys; ++k) {
             if (!r.keyHeard[k] || r.keySeconds[k] < 8) continue;
             const double dk = avgDev(k, b.f0, b.f1) - avgDev(0, b.f0, b.f1);
-            if (std::abs(dk) <= room + 0.4) continue;
+            if (std::abs(dk) <= sectRoom) continue;
             const double sc = std::abs(dk) * std::sqrt(r.keySeconds[k]);
             if (sc > score[0]) { pick[1] = pick[0]; score[1] = score[0]; pick[0] = k; score[0] = sc; }
             else if (sc > score[1]) { pick[1] = k; score[1] = sc; }
@@ -309,7 +371,7 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
                 m.what = std::string(b.name) + "  " + fmt1(m.full, true) + " dB";
                 m.why = "The " + many(k) + " sit " + (dk > 0 ? "brighter" : "duller") + " than the rest of the song.";
                 if (b.param == tLow) m.why = "The " + many(k) + " carry " + (dk > 0 ? "more" : "less") + " low end than the rest of the song.";
-                m.conf = confFor(dk, room, b.kind) - 8;
+                m.conf = confFor(dk, sectRoom, b.kind) - 8;
                 add(m);
             }
         }
@@ -340,13 +402,14 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
                 ++sectionMoves;
             }
         }
-        if (hSong > 1.4 && sectionMoves < 2) {
+        // Released records show a bump of up to 1.8 dB here and aren't harsh; past 2 dB, it is.
+        if (hSong > 2.0 && sectionMoves < 2) {
             Move m; m.key = 0; m.param = cHarsh; m.kind = mkHarsh; m.module = "CLEAN";
             m.full = float(clamp(hSong, 1.0, 4.0));
             m.extraParam = cleanIn; m.extraValue = 1;
             m.what = "HARSH  " + fmt1(song[cHarsh]) + " \xe2\x86\x92 " + fmt1(std::min(10.0f, song[cHarsh] + m.full));
             m.why = "The song is harsh around 3 to 4 kHz.";
-            m.conf = confFor(hSong, 1.4, mkHarsh);
+            m.conf = confFor(hSong, 2.0, mkHarsh);
             add(m);
         }
     }
@@ -366,11 +429,12 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
     }
 
     // BASS MONO: side energy in the low end.
-    if (r.sideLowDb[0] > -14 && !(song[stIn] > 0.5f && song[sMono] > 1)) {
+    // Released records keep the side under 100 Hz 18 to 33 dB down; a few wide ones sit near -10.
+    if (r.sideLowDb[0] > kLowSideMax && !(song[stIn] > 0.5f && song[sMono] > 1)) {
         Move m; m.key = 0; m.param = sMono; m.absolute = true; m.full = 120; m.kind = mkMono; m.module = "STEREO";
         m.extraParam = stIn; m.extraValue = 1;
         m.what = "BASS MONO  BELOW 120 Hz"; m.why = "The low end drifts off centre.";
-        m.conf = confFor(r.sideLowDb[0] + 14, 3, mkMono);
+        m.conf = confFor(r.sideLowDb[0] - kLowSideMax, 3, mkMono);
         add(m);
     }
 
@@ -459,14 +523,31 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
         }
     }
 
+    // A mix that comes in already limited: its 10 ms peaks pile up just under one level. Released
+    // masters put 16 to 60% of their loud windows within 2 dB of the top; gentle masters (and mixes)
+    // under 3%. Lacquer can't take a limiter back off, so this is a note for the mix.
+    r.peakPile = peakPile(all);
+    if (all.seconds >= 30 && r.peakPile > 0.12)
+        r.mixNotes.insert(r.mixNotes.begin(), "The mix comes in already limited. Bounce it without the mix-bus limiter and let LOUDNESS do that job.");
+
     // Checks: what the pass heard.
     const double dc = std::max(std::abs(st.dc[0]), std::abs(st.dc[1])) / std::max(1.0, st.samples);
-    r.checks.push_back({"PHASE", st.corrMin > 0 ? "correlation stays above " + fmt1(std::floor(st.corrMin * 10) / 10, true) : "the sides cancel in places (correlation " + fmt1(st.corrMin, true) + ")", st.corrMin > 0});
+    // PHASE: a moment of negative correlation (a wide reverb tail, a stereo synth) is normal on good
+    // records; the sides cancelling for more than a second or two of the song's loud stretches is not.
+    {
+        const double negPct = st.corrSeconds > 0 ? 100.0 * st.corrNegSeconds / st.corrSeconds : 0;
+        const bool ok = negPct < 1.0 && st.corrMin > -0.5;
+        r.checks.push_back({"PHASE", ok ? (st.corrMin > 0 ? "correlation stays above " + fmt1(std::floor(st.corrMin * 10) / 10, true) : "the sides stay together")
+                                        : "the sides cancel for " + fmt1(negPct) + "% of the song",
+                            ok});
+    }
     const bool monoFixed = song[stIn] > 0.5f && song[sMono] > 1;
-    r.checks.push_back({"MONO", monoFixed ? "low end centred below " + std::to_string(int(song[sMono])) + " Hz" : (r.sideLowDb[0] > -14 ? "the low end drifts off centre" : "the low end is centred"), monoFixed || r.sideLowDb[0] <= -14});
+    r.checks.push_back({"MONO", monoFixed ? "low end centred below " + std::to_string(int(song[sMono])) + " Hz" : (r.sideLowDb[0] > kLowSideMax ? "the low end drifts off centre" : "the low end is centred"), monoFixed || r.sideLowDb[0] <= kLowSideMax});
     const bool rumbleFixed = song[cleanIn] > 0.5f && song[cRumble] > 1;
     r.checks.push_back({"RUMBLE", rumbleFixed ? "cut below " + std::to_string(int(song[cRumble])) + " Hz" : (r.subDb > -10 ? "rumble under the kick" : "nothing under the kick"), rumbleFixed || r.subDb <= -10});
-    r.checks.push_back({"DC OFFSET", dc < 1e-4 ? "none" : "the waveform sits off centre", dc < 1e-4});
+    // A whole song's average sits around -75 dBFS from lopsided kicks and bass alone; a converter's
+    // offset is more like -50 dBFS and up.
+    r.checks.push_back({"DC OFFSET", dc < 3e-3 ? "none" : "the waveform sits off centre", dc < 3e-3});
     r.checks.push_back({"START AND END", st.firstLevelDb > -30 ? "the song starts abruptly: check for a click" : "clean, no clicks", st.firstLevelDb <= -30});
     return r;
 }

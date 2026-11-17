@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Lacquer VERSION 0.3.1 LANGUAGES C CXX)
+project(Lacquer VERSION 0.3.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -91,6 +91,12 @@ if(LQ_BUILD_PLUGIN)
         target_compile_definitions(plugin_selftest PRIVATE ${LQ_DEFINES} JucePlugin_VersionString="${PROJECT_VERSION}")
         target_link_libraries(plugin_selftest PRIVATE lq_engine LacquerData juce::juce_audio_utils juce::juce_recommended_config_flags)
         add_test(NAME plugin_selftest COMMAND plugin_selftest)
+
+        # Runs finished songs through the analysis and the assistant, for checking it on real records.
+        juce_add_console_app(lacquer_analyse PRODUCT_NAME "lacquer_analyse")
+        target_sources(lacquer_analyse PRIVATE tests/analyse.cpp)
+        target_compile_definitions(lacquer_analyse PRIVATE ${LQ_DEFINES})
+        target_link_libraries(lacquer_analyse PRIVATE lq_engine juce::juce_audio_formats juce::juce_recommended_config_flags)
 
         # Renders the window to PNGs, for checking it without a host.
         juce_add_console_app(ui_snapshot PRODUCT_NAME "ui_snapshot")

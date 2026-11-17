@@ -61,11 +61,12 @@ struct SongStats {
     // (with the drive in use kept alongside): what the limiter does to each section.
     KeyStats limIn[kNumKeys], out[kNumKeys];
     double dc[2]{}, samples = 0;
-    double corrMin = 1;
+    double corrMin = 1;                          // over the loud stretches
+    double corrSeconds = 0, corrNegSeconds = 0;  // time in the loud stretches, and of it below zero
     double firstLevelDb = -120, lastLevelDb = -120;   // the first 5 ms and the last 50 ms heard
     bool started = false;
     double subRatioDb = -60;    // filled in by summarise()
-    void clear() { for (auto& k : key) k.clear(); for (auto& k : limIn) k.clear(); for (auto& k : out) k.clear(); dc[0] = dc[1] = 0; samples = 0; corrMin = 1; firstLevelDb = lastLevelDb = -120; started = false; }
+    void clear() { for (auto& k : key) k.clear(); for (auto& k : limIn) k.clear(); for (auto& k : out) k.clear(); dc[0] = dc[1] = 0; samples = 0; corrMin = 1; corrSeconds = corrNegSeconds = 0; firstLevelDb = lastLevelDb = -120; started = false; }
 };
 
 class Analyser {
@@ -92,6 +93,7 @@ public:
         blockLen_ = int(0.1 * fs);
         winLen_ = int(0.01 * fs);
         corrA_ = tcCoef(0.4, fs);
+        invFs_ = 1.0 / fs;
         reset();
     }
     void reset() {
@@ -125,7 +127,13 @@ public:
             xl_ = l * l + (xl_ - l * l) * corrA_;
             xr_ = r * r + (xr_ - r * r) * corrA_;
             xx_ = l * r + (xx_ - l * r) * corrA_;
-            if (xl_ + xr_ > 1e-6) st_.corrMin = std::min(st_.corrMin, xx_ / std::sqrt(xl_ * xr_ + 1e-18));
+            // Loud stretches only (about -30 dBFS and up): a fade's last breath doesn't count.
+            if (xl_ + xr_ > 1e-3) {
+                const double c = xx_ / std::sqrt(xl_ * xr_ + 1e-18);
+                st_.corrMin = std::min(st_.corrMin, c);
+                st_.corrSeconds += invFs_;
+                if (c < 0) st_.corrNegSeconds += invFs_;
+            }
         }
         // K-weighted 100 ms slots, four to a 400 ms block (75 % overlap).
         for (int i = 0; i < n; ++i) {
@@ -175,7 +183,7 @@ private:
     double subMs_ = 0, quarter_[4]{};
     int subN_ = 0, qi_ = 0, blockLen_ = 4800, winLen_ = 480, winN_ = 0;
     double winPk_ = 0, tail_ = 0;
-    double xl_ = 1e-9, xr_ = 1e-9, xx_ = 1e-9, corrA_ = 0;
+    double xl_ = 1e-9, xr_ = 1e-9, xx_ = 1e-9, corrA_ = 0, invFs_ = 1.0 / 48000;
 };
 
 // The spectrum of one key as dB per band, its overall level taken out (the 200 Hz to 2 kHz

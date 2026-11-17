@@ -6,6 +6,7 @@
 #include "lq_engine.hpp"
 #include "testsig.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <memory>
@@ -541,6 +542,69 @@ int main() {
               "mix " + num(c.mixGap[2], 1) + " dB apart, master " + num(c.masterGap[2], 1) + " dB");
         check(lift && lift->full < w[lTarget] - 0.3f && lift->full >= w[lTarget] - 3.0f, "the verses get their own, lower TARGET",
               lift ? lift->what + ": " + lift->why : std::string("no move"));
+    }
+
+    // ---- calibration against released records: an already-limited mix, a song's natural offset,
+    // and the targets' shape
+    {
+        // 40 s of drum-like hits over a bed: an unlimited mix, then the same pushed into a hard ceiling.
+        std::vector<float> L(size_t(40 * kFs)), R(L.size());
+        uint32_t seed = 7;
+        auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return float(int32_t(seed)) / 2147483648.0f; };
+        double env = 0;
+        for (size_t i = 0; i < L.size(); ++i) {
+            if (i % size_t(kFs / 4) == 0) env = 0.3 + 0.7 * std::abs(rnd());   // a hit every quarter second, uneven
+            env *= 0.9997;
+            const float x = float(env) * rnd() * 0.5f + 0.05f * rnd();
+            L[i] = x; R[i] = 0.9f * x + 0.02f * rnd();
+        }
+        auto pile = [&](float drive) {
+            Analyser a;
+            a.prepare(kFs);
+            std::vector<float> l = L, r = R;
+            for (size_t i = 0; i < l.size(); ++i) {
+                l[i] = std::clamp(l[i] * drive, -0.9f, 0.9f);
+                r[i] = std::clamp(r[i] * drive, -0.9f, 0.9f);
+            }
+            for (size_t i = 0; i < l.size(); i += 512) a.push(l.data() + i, r.data() + i, int(std::min<size_t>(512, l.size() - i)), 0);
+            return peakPile(a.stats().key[0]);
+        };
+        const double open = pile(1.0f), limited = pile(6.0f);
+        check(open < 0.12 && limited > 0.12, "a mix that comes in limited is told so, and an open one isn't",
+              "peaks near the top: " + num(100 * open, 0) + "% open, " + num(100 * limited, 0) + "% limited");
+
+        // The same open mix with the small offset kicks and bass leave (-75 dBFS), then a real one (-40).
+        auto dcFlag = [&](float off) {
+            auto e = engine();
+            testsig::Song t;
+            t.L = L; t.R = R; t.bpm = 120;
+            for (auto& x : t.L) x += off;
+            for (auto& x : t.R) x += off;
+            e->setListening(true);
+            run(*e, t, v, 512);
+            e->setListening(false);
+            Values sec[kNumKeys];
+            for (int k = 0; k < kNumKeys; ++k) sec[k] = e->valuesFor(k, v);
+            const Result res = assist(e->analyser().stats(), genreTarget(0), v, sec, Taste{}, false);
+            for (const auto& c : res.checks) if (c.name == "DC OFFSET") return !c.ok;
+            return false;
+        };
+        const bool small = dcFlag(0.0002f), real = dcFlag(0.01f);
+        check(!small && real, "DC OFFSET ignores a song's natural offset and flags a real one");
+
+        // The targets fall away above the mids, as released records do, and the corridor is widest at the ends.
+        const Target t = genreTarget(0);
+        double mid = 0, top = 0; int nm = 0, nt = 0;
+        for (int b = 0; b < kBands; ++b) {
+            const double f = bandCentre(b);
+            if (f >= 200 && f <= 2000) { mid += t.curve[b]; ++nm; }
+            if (f >= 8000 && f <= 12500) { top += t.curve[b]; ++nt; }
+        }
+        top /= nt; mid /= nm;
+        int b40 = 0, b1k = 0;
+        for (int b = 0; b < kBands; ++b) { if (bandCentre(b) < 40) b40 = b; if (bandCentre(b) < 1000) b1k = b; }
+        check(top < mid - 5 && top > mid - 11 && t.width[b40] > t.width[b1k], "the targets sit the top end under the mids, as records do",
+              "8 to 12.5 kHz " + num(top - mid, 1) + " dB against 200 Hz to 2 kHz");
     }
 
     // ---- cost

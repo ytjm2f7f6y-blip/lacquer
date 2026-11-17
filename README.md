@@ -80,6 +80,27 @@ song-wide where the whole song is off, for one section where only that section i
 (a harsh chorus gets a chorus-only HARSH move). AMOUNT scales the relative moves you
 have taken. With LEARN on, what you take and skip shifts what it suggests next time.
 
+**Where the targets come from.** The style curves start from the average balance of
+twelve released, professionally mixed and mastered songs (indie, rock, metal, pop, R&B,
+electronic, hip-hop, acoustic; CC-licensed releases) measured with this analyser, bent a
+little for each style. Against pink noise they fall about 1.5 dB an octave from 100 Hz
+to 4 kHz and faster above, the shape Pestana et al. (AES 2013) found across commercial
+records from 1950 to 2010. The corridor is as wide as those records spread (about one
+standard deviation, band by band): inside it is taste, and a TONE move is suggested
+only once a band's average leaves it. `lacquer_analyse` (built with the tests) runs
+any finished songs through the pass and the assistant, so the calibration can be
+checked on more records:
+
+```
+build/lacquer_analyse_artefacts/Release/lacquer_analyse --style 0 song.wav ...
+```
+
+On those twelve records the assistant suggests one or two TONE moves a song, mostly at
+45 to 60% confidence; the opening settings turn each down to about -12.5 LUFS with
+1.5 to 2 dB of glue on average and the limiter all but idle, keep the loudness range,
+and hold the true peak at -1 dBTP. Ten of the twelve are flagged as already limited,
+and the two gentle masters aren't.
+
 **Sections** are marks in the song map (bar positions and a key). A section's own
 settings are only the ones it changes; everything else follows the song, so changing
 the song's glue changes every section that hasn't set its own. A section's own TARGET
