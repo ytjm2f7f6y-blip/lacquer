@@ -146,9 +146,13 @@ Codec::Codec() : impl_(std::make_unique<Impl>()) {
     out_.prepare(kRing);
 }
 
-Codec::~Codec() { stop(); }
+Codec::~Codec() {
+    const std::lock_guard<std::mutex> lock(life_);
+    stop();
+}
 
 void Codec::prepare(double sampleRate) {
+    const std::lock_guard<std::mutex> lock(life_);
     stop();
     fs_ = sampleRate;
     in_.prepare(kRing);
@@ -161,14 +165,15 @@ void Codec::prepare(double sampleRate) {
 }
 
 void Codec::setBitrate(int kbps) {
-    if (kbps == kbps_ && available_.load()) return;
-    kbps_ = kbps;
+    const std::lock_guard<std::mutex> lock(life_);
+    if (kbps == kbps_.load() && available_.load()) return;
+    kbps_.store(kbps);
     stop();
     start();
 }
 
 void Codec::start() {
-    available_.store(impl_->open(fs_, kbps_, why_));
+    available_.store(impl_->open(fs_, kbps_.load(), why_));
     if (!available_.load()) return;
     running_.store(true);
     worker_ = std::thread([this] { run(); });

@@ -13,6 +13,7 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -76,7 +77,7 @@ public:
     void setBitrate(int kbps);
     bool available() const { return available_.load(); }
     std::string why() const { return why_; }           // when it isn't available
-    int kbps() const { return kbps_; }
+    int kbps() const { return kbps_.load(); }
 
     // Audio thread.
     void process(float* L, float* R, int n) override;
@@ -96,7 +97,10 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     double fs_ = 48000;
-    int kbps_ = 256;
+    std::atomic<int> kbps_{256};
+    // prepare() comes from the host's thread and setBitrate() from the window's timer: one at a time,
+    // or two of them can join the same worker (pluginval caught this, automating the bit rate).
+    std::mutex life_;
     std::atomic<bool> available_{false}, running_{false}, resetPeak_{false};
     std::string why_;
     std::thread worker_;
