@@ -30,13 +30,13 @@ enum P {
     // loudness
     loudIn, lTarget, lCeiling, lClip, lGuard,
     // output
-    oListen, oCodec, oDither, oMonitor, oMatch,
+    oListen, oStream, oDither, oMonitor,
     // the DETAIL page: tone's frequencies, its fourth band and where each band works; glue's
-    // timing; the limiter's style; BEFORE; the codec's bit rate
+    // timing; the limiter's style; COMPARE; the codec's bit rate
     tMud, tLowHz, tMudHz, tPresHz, tAirHz, tLowPl, tMudPl, tPresPl, tAirPl, tPhase,
     dAttack, dRelease, dRatio,
     lStyle, lRelease,
-    oBefore, oCodecRate,
+    oCompare, oCodecRate,
     kNumParams
 };
 
@@ -110,10 +110,9 @@ inline const ParamDef* paramTable() {
         {lGuard, "l_guard", "guard", kBool, 0, 1, 1, 0, nullptr, "", false, gStep},
 
         {oListen, "o_listen", "listen on", kChoice, 0, 4, 0, 5, "desk|phone|buds|car|club", "", false, gStep},
-        {oCodec, "o_codec", "codec", kBool, 0, 1, 0, 0, nullptr, "", false, gStep},
+        {oStream, "o_stream", "as streamed", kChoice, 0, 2, 0, 3, "off|spotify|apple", "", false, gStep},
         {oDither, "o_dither", "dither", kChoice, 0, 2, 1, 3, "off|24|16", "", false, gStep},
         {oMonitor, "o_monitor", "monitor", kLin, -30, 0, 0, 0, nullptr, "dB", false, gLin},
-        {oMatch, "o_match", "matched", kBool, 0, 1, 1, 0, nullptr, "", false, gStep},
 
         {tMud, "t_mud", "mud", kLin, -12, 12, 0, 0, nullptr, "dB", true, gLin},
         {tLowHz, "t_low_hz", "low freq", kLog, 40, 250, 110, 0, nullptr, "Hz", true, gLog},
@@ -130,7 +129,7 @@ inline const ParamDef* paramTable() {
         {dRatio, "d_ratio", "glue ratio", kChoice, 0, 3, 1, 4, "1.5 : 1|2 : 1|3 : 1|4 : 1", "", true, gStep},
         {lStyle, "l_style", "limiter style", kChoice, 0, 2, 0, 3, "clean|punchy|dense", "", false, gStep},
         {lRelease, "l_release", "limiter release", kChoice, 0, 3, 0, 4, "auto|fast|medium|slow", "", false, gStep},
-        {oBefore, "o_before", "before", kBool, 0, 1, 0, 0, nullptr, "", false, gStep},
+        {oCompare, "o_compare", "compare", kChoice, 0, 2, 1, 3, "mix|master|ref", "", false, gStep},
         {oCodecRate, "o_codec_rate", "codec rate", kChoice, 0, 1, 0, 2, "aac 256|aac 128", "", false, gStep},
     };
     return t;
@@ -184,5 +183,13 @@ struct Values {
     float operator[](int i) const { return v[i]; }
     float& operator[](int i) { return v[i]; }
 };
+
+// The ceiling in force. With GUARD on, a master louder than -14 LUFS gets 2 dB under full scale,
+// not 1: Spotify asks for -2 dBTP above -14 LUFS, since loud masters pick up more overs when encoded.
+constexpr double kLoudForStreams = -14.0, kLoudCeiling = -2.0;
+inline double ceilingFor(const Values& song, double aimLufs) {
+    const double c = song[lCeiling];
+    return song[lGuard] > 0.5f && aimLufs > kLoudForStreams ? std::min(c, kLoudCeiling) : c;
+}
 
 }  // namespace lq

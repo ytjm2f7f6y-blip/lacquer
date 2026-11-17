@@ -244,7 +244,7 @@ int main() {
             juce::AudioBuffer<float> io(2, block);
             juce::MidiBuffer midi;
             auto runFor = [&](double secs, bool codec) {
-                p.setSong(oCodec, codec ? 1.0f : 0.0f);
+                p.setSong(oStream, codec ? 1.0f : 0.0f);
                 double ms = 0; int cnt = 0;
                 const int blocks = int(secs * sr / block);
                 for (int k = 0; k < blocks; ++k) {
@@ -257,11 +257,67 @@ int main() {
             };
             const double plain = runFor(1.0, false), coded = runFor(2.0, true);
             std::printf("      codec %s: %.2f dB through AAC against %.2f dB without, peak after encoding %.2f dBTP\n", p.codecAvailable() ? "on" : "unavailable", coded, plain, p.codecPeak());
-            CHECK(p.codecAvailable() && std::abs(coded - plain) < 1.5 && p.codecPeak() > -100, "CODEC plays the master back through Apple's AAC encoder");
-            p.setSong(oCodec, 0.0f);
+            const double turned = p.meters().spotifyDb.load();
+            std::printf("      Spotify turns it %.2f dB\n", turned);
+            CHECK(p.codecAvailable() && std::abs(coded - plain - turned) < 1.5 && p.codecPeak() > -100, "AS STREAMED plays the master back through Apple's AAC encoder, at Spotify's level");
+            p.setSong(oStream, 0.0f);
 #else
-            CHECK(!p.codecAvailable() && p.codecWhy().isNotEmpty(), "CODEC says why it can't run here (it needs a Mac)");
+            CHECK(!p.codecAvailable() && p.codecWhy().isNotEmpty(), "AS STREAMED says why the encoder can't run here (it needs a Mac)");
 #endif
+        }
+
+        // ---- a fresh Lacquer starts the assistant by itself; a saved session doesn't
+        {
+            LacquerProcessor a;
+            Head h;
+            a.setPlayHead(&h);
+            a.setRateAndBufferSizeDetails(sr, block);
+            a.prepareToPlay(sr, block);
+            a.setAutoStartForTests(true);
+            a.idle();
+            play(a, h, song, block);
+            a.idle();
+            int took = 0;
+            bool sure = true;
+            for (const auto& mv : a.result().moves) { took += mv.taken ? 1 : 0; if (mv.taken != (mv.conf >= LacquerProcessor::kAutoConfidence)) sure = false; }
+            std::printf("      by itself: %d of %d moves taken (%s)\n", took, int(a.result().moves.size()), a.lastNote.toRawUTF8());
+            CHECK(a.result().any && !a.listening() && !a.autoPending(), "a fresh Lacquer listens on its first play by itself");
+            CHECK(sure && took > 0 && a.page == 2, "and takes the moves it's sure of, leaving the rest on MOVES");
+            juce::MemoryBlock st;
+            p.getStateInformation(st);
+            LacquerProcessor b;
+            Head hb;
+            b.setPlayHead(&hb);
+            b.setRateAndBufferSizeDetails(sr, block);
+            b.prepareToPlay(sr, block);
+            b.setAutoStartForTests(true);
+            b.setStateInformation(st.getData(), int(st.getSize()));
+            b.idle();
+            play(b, hb, song, block);
+            b.idle();
+            CHECK(!b.autoPending() && b.listenedSeconds() < 1.0, "a saved session doesn't start it by itself");
+        }
+
+        // ---- COMPARE's reference: decoded off the audio thread, turned to the session's rate
+        {
+            const auto wav = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("lacquer_ref_test.wav");
+            {
+                juce::AudioBuffer<float> b(2, 44100 * 10);
+                juce::Random rnd(5);
+                for (int i = 0; i < b.getNumSamples(); ++i) { const float x = 0.1f * (rnd.nextFloat() * 2 - 1); b.setSample(0, i, x); b.setSample(1, i, x); }
+                wav.deleteFile();
+                juce::WavAudioFormat fmt;
+                std::unique_ptr<juce::OutputStream> os(wav.createOutputStream().release());
+                if (auto w = fmt.createWriterFor(os, juce::AudioFormatWriterOptions{}.withSampleRate(44100).withNumChannels(2).withBitsPerSample(24)); w != nullptr) {
+                    w->writeFromAudioSampleBuffer(b, 0, b.getNumSamples());
+                }
+            }
+            p.choosePlayRef(wav);
+            for (int i = 0; i < 300 && !p.hasPlayRef(); ++i) { juce::Thread::sleep(20); p.idle(); }
+            std::printf("      reference: %.2f s at the session's rate, %.1f LUFS\n", p.playRefSeconds(), p.playRefLufs());
+            CHECK(p.hasPlayRef() && std::abs(p.playRefSeconds() - 10.0) < 0.05 && p.playRefLufs() > -30 && p.playRefLufs() < -10,
+                  "a reference for COMPARE is read, resampled from 44.1 kHz and measured");
+            wav.deleteFile();
         }
 
         // ---- presets

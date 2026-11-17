@@ -69,6 +69,9 @@ private:
     void click(int ci, const juce::MouseEvent&);
     void beginEdit(int p);
     void endEdit(int p);
+    int compareIndex() const;
+    void setCompare(int idx);
+    void chooseRefToPlay(bool thenCompare);
     void showSetMenu();
     void showPresetMenu();
     void renameSections();

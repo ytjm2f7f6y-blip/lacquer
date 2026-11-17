@@ -226,7 +226,8 @@ inline Contrast contrastFrom(const SongStats& st) {
 
 // The loudness knee: how much of the drums' snap survives as the drive goes up, from the
 // histogram of 10 ms peaks. A window loses what the limiter takes off it past the first dB.
-inline Knee kneeFromPeaks(const double* pk, double windows, double inputLufs, double ceilingDb, double clip) {
+// ceilingDb: the ceiling knob. autoCeiling: GUARD's lower ceiling over -14 LUFS (see ceilingFor).
+inline Knee kneeFromPeaks(const double* pk, double windows, double inputLufs, double ceilingDb, double clip, bool autoCeiling = false) {
     Knee k;
     if (windows < 50) return k;
     k.inputLufs = inputLufs;
@@ -235,11 +236,12 @@ inline Knee kneeFromPeaks(const double* pk, double windows, double inputLufs, do
     bool found = false;
     for (int i = 0; i <= 100; ++i) {
         const double L = -16 + i * 0.1, drive = L - k.inputLufs;
+        const double ceil = autoCeiling && L > kLoudForStreams ? std::min(ceilingDb, kLoudCeiling) : ceilingDb;
         double ex = 0;
         for (int b = 0; b < kPkBins; ++b) {
             if (pk[b] <= 0) continue;
             const double p = -70 + b * 0.5 + 0.25;
-            const double gr = std::max(0.0, p + drive - ceilingDb - clipHelp);
+            const double gr = std::max(0.0, p + drive - ceil - clipHelp);
             ex += pk[b] * std::max(0.0, gr - 1.0);
         }
         ex /= windows;
@@ -250,8 +252,8 @@ inline Knee kneeFromPeaks(const double* pk, double windows, double inputLufs, do
     k.known = true;
     return k;
 }
-inline Knee kneeFrom(const KeyStats& song, double ceilingDb, double clip) {
-    return kneeFromPeaks(song.pk, song.windows, song.integrated(), ceilingDb, clip);
+inline Knee kneeFrom(const KeyStats& song, double ceilingDb, double clip, bool autoCeiling = false) {
+    return kneeFromPeaks(song.pk, song.windows, song.integrated(), ceilingDb, clip, autoCeiling);
 }
 
 // What each destination usually asks for. Streaming services turn anything louder than about -14
@@ -473,7 +475,7 @@ inline Result assist(const SongStats& st, const Target& tgt, const Values& song,
 
     // LOUDNESS: as loud as the destination asks, but not past the knee.
     // The knee from the limiter's own input when the pass has it (so PUNCH, GLUE and COLOUR count).
-    r.knee = kneeFrom(st.limIn[0].windows >= 50 ? st.limIn[0] : all, song[lCeiling], song[lClip]);
+    r.knee = kneeFrom(st.limIn[0].windows >= 50 ? st.limIn[0] : all, song[lCeiling], song[lClip], song[lGuard] > 0.5f);
     if (r.knee.known) {
         const double want = std::min(double(destinationLufs(int(song[aDest]))), r.knee.kneeLufs - 0.2);
         const double t = std::round(clamp(want, -16.0, -6.0) * 10) / 10;

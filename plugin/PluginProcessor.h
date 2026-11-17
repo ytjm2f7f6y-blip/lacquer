@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #ifndef JucePlugin_Name
@@ -100,6 +101,14 @@ public:
     // ---- the listening pass and the assistant (message thread)
     bool listening() const { return listenWanted_.load(); }
     void setListening(bool on);
+    // A fresh Lacquer listens on its first play by itself and takes the moves it's sure of (at
+    // AMOUNT); the rest wait on MOVES. Once per instance; a setting for every session.
+    bool autoStart() const;
+    void setAutoStart(bool on);
+    bool autoPending() const { return autoPending_.load(); }
+    void setAutoStartForTests(bool on) { autoStartPref_ = on; if (!on) autoArmed_.store(false); }   // not saved
+    static constexpr int kAutoConfidence = 70;        // the moves it takes by itself
+    static constexpr double kAutoSeconds = 40.0;      // how much it must hear before it does
     double listenedSeconds() const { return listenSeconds_.load(); }
     const lq::Result& result() const { return result_; }
     const lq::Target& target() const { return target_; }
@@ -156,6 +165,15 @@ public:
     void forgetLoudness();                            // a new mix: learn it from scratch
     int latencyNow() const { return engine_.latencyFor(songValue(lq::tPhase) >= 0.5f); }
 
+    // ---- COMPARE's reference song (played in time with the master, at its loudness)
+    void choosePlayRef(const juce::File& f);          // decoded off the audio thread
+    bool hasPlayRef() const { return refAudio_ != nullptr; }
+    bool playRefLoading() const { return refLoading_.load() > 0; }
+    juce::String playRefName() const { return refPath_.isEmpty() ? juce::String() : juce::File(refPath_).getFileNameWithoutExtension(); }
+    juce::String playRefPath() const { return refPath_; }
+    double playRefLufs() const { return refAudio_ ? refAudio_->lufs : -70.0; }
+    double playRefSeconds() const { return refAudio_ && refRate_ > 0 ? double(refAudio_->L.size()) / refRate_ : 0.0; }
+
     // ---- the codec preview
     bool codecAvailable() const { return codec_.available(); }
     juce::String codecWhy() const { return juce::String(codec_.why()); }
@@ -178,6 +196,7 @@ public:
 private:
     void timerCallback() override { idle(); }
     void finishPass();
+    void adoptPlayRef();
     void runAssistant();
     void rebuildTarget();
     lq::Target styleTarget(int i) const;
@@ -231,6 +250,22 @@ private:
     std::atomic<bool> follow_{true};
     double lastTapPpq_ = -1e9;
     std::array<juce::String, kSections> sectionNames_;
+
+    // auto-start
+    std::atomic<bool> autoPending_{true}, autoArmed_{false};
+    bool autoPass_ = false, autoStartPref_ = true;
+
+    // COMPARE's reference
+    std::unique_ptr<lq::RefAudio> refAudio_;
+    struct Retired { std::unique_ptr<lq::RefAudio> ref; juce::uint32 at; };
+    std::vector<Retired> refGrave_;
+    juce::String refPath_;
+    double refRate_ = 0;
+    std::atomic<int> refLoading_{0};
+    std::atomic<bool> refReload_{false};
+    std::mutex refMutex_;
+    std::unique_ptr<lq::RefAudio> refReady_;          // decoded, waiting for idle()
+    double refReadyRate_ = 0;
 
     // A / B
     int ab_ = 0;

@@ -322,11 +322,11 @@ int main() {
         check(loud[2] > loud[0] + 0.2, "DENSE makes more of the same drive than CLEAN", "clean " + num(loud[0], 2) + ", punchy " + num(loud[1], 2) + ", dense " + num(loud[2], 2) + " LUFS");
     }
 
-    // ---- BEFORE: the song as it came in, lined up and as loud as the master
+    // ---- COMPARE's MIX: the song as it came in, lined up and as loud as the master
     {
         auto a = engine(), b = engine();
         Values w = v, bw = v;
-        bw[oBefore] = 1.0f;
+        bw[oCompare] = 0.0f;
         a->setMeasuredInput(lufs(s.L, s.R), true);
         b->setMeasuredInput(lufs(s.L, s.R), true);
         const Run ra = run(*a, s, w, 512), rb = run(*b, s, bw, 512);
@@ -336,14 +336,100 @@ int main() {
         double xy = 0, xx = 0, yy = 0;
         for (size_t i = size_t(10 * kFs); i < size_t(20 * kFs); ++i) { const double x = s.L[i - lat], y = rb.L[i]; xy += x * y; xx += x * x; yy += y * y; }
         const double corr = xy / std::sqrt(xx * yy + 1e-30);
-        check(std::abs(la - lb) < 1.0 && corr > 0.99, "BEFORE plays the mix in time with the master, at the master's loudness",
-              "master " + num(la, 1) + ", before " + num(lb, 1) + " LUFS, correlation " + num(corr, 4));
+        check(std::abs(la - lb) < 1.0 && corr > 0.99, "COMPARE MIX plays the mix in time with the master, at the master's loudness",
+              "master " + num(la, 1) + ", mix " + num(lb, 1) + " LUFS, correlation " + num(corr, 4));
         auto c = engine();
         c->setMeasuredInput(lufs(s.L, s.R), true);
         const Run rc = run(*c, s, bw, 512, true), rd = ra;
         double d = 0;
         for (size_t i = 0; i < rc.L.size(); ++i) d = std::max(d, double(std::abs(rc.L[i] - rd.L[i])));
         check(d < 1e-5, "and never reaches a bounce");
+
+        // REF: a reference song, 9 dB quieter than the master, played in its place at the master's loudness.
+        RefAudio ref;
+        ref.L.resize(size_t(30 * kFs)); ref.R.resize(ref.L.size());
+        uint32_t seed = 3;
+        for (size_t i = 0; i < ref.L.size(); ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            const float x = float(int32_t(seed)) / 2147483648.0f * 0.05f * float(1 + 0.5 * std::sin(i * 0.0003));
+            ref.L[i] = x; ref.R[i] = 0.8f * x;
+        }
+        ref.lufs = lufs(ref.L, ref.R);
+        Values rw = v;
+        rw[oCompare] = 2.0f;
+        auto e = engine();
+        e->setMeasuredInput(lufs(s.L, s.R), true);
+        e->setReference(&ref);
+        const Run re = run(*e, s, rw, 512);
+        const double lr = lufs(re.L, re.R, size_t(12 * kFs));
+        // (The engine works in sub-blocks of kSub samples, so the reference comes out a sub-block late here.)
+        double rcorr = 0;
+        for (size_t lag = 0; lag <= 64; ++lag) {
+            double rxy = 0, rxx = 0, ryy = 0;
+            for (size_t i = size_t(12 * kFs); i < size_t(20 * kFs); ++i) { const double x = ref.L[i - lag], y = re.L[i]; rxy += x * y; rxx += x * x; ryy += y * y; }
+            rcorr = std::max(rcorr, rxy / std::sqrt(rxx * ryy + 1e-30));
+        }
+        // (Matched to the master's integrated loudness over the play so far, the whole song by the end.)
+        const double lm = lufs(ra.L, ra.R);
+        check(std::abs(lr - lm) < 1.5 && rcorr > 0.99 && ref.lufs < lr - 6,
+              "COMPARE REF plays the reference in the master's place, at the master's loudness",
+              "reference " + num(ref.lufs, 1) + " LUFS as it is, " + num(lr, 1) + " as heard; the master " + num(lm, 1));
+        auto f = engine();
+        f->setMeasuredInput(lufs(s.L, s.R), true);
+        f->setReference(&ref);
+        const Run rf = run(*f, s, rw, 512, true);
+        double dr = 0;
+        for (size_t i = 0; i < rf.L.size(); ++i) dr = std::max(dr, double(std::abs(rf.L[i] - ra.L[i])));
+        check(dr < 1e-5, "and REF never reaches a bounce either");
+    }
+
+    // ---- AS STREAMED: turned to Spotify's -14 or Apple Music's -16, as each service does it
+    {
+        check(std::abs(Engine::streamGain(-14, -20, -5) - 4.0) < 1e-9 && std::abs(Engine::streamGain(-14, -9, -1) + 5.0) < 1e-9,
+              "a quiet master is lifted only as far as its peaks allow (Spotify's own example: -20 LUFS peaking at -5 plays at -16)");
+        Values w = v;
+        w[lTarget] = -10.0f;
+        auto a = engine(), b = engine(), c = engine();
+        for (auto* e : {a.get(), b.get(), c.get()}) { e->setMeasuredInput(lufs(s.L, s.R), true); e->setKnee(-6, true); }
+        const Run ra = run(*a, s, w, 512);
+        Values ws = w;
+        ws[oStream] = 1.0f;
+        const Run rb = run(*b, s, ws, 512);
+        const double sp = b->meters().spotifyDb.load(), ap = b->meters().appleDb.load();
+        const double la = lufs(ra.L, ra.R, size_t(14 * kFs)), lb = lufs(rb.L, rb.R, size_t(14 * kFs));
+        check(std::abs(sp - (-14 - la)) < 0.8 && std::abs(ap - (-16 - la)) < 0.8 && std::abs((lb - la) - sp) < 0.6,
+              "AS STREAMED SPOTIFY turns a loud master down to -14 LUFS, and says what Apple Music would do",
+              "master " + num(la, 1) + " LUFS; Spotify " + num(sp, 1) + " dB, Apple " + num(ap, 1) + " dB; heard at " + num(lb, 1));
+        const Run rc = run(*c, s, ws, 512, true);
+        double d = 0;
+        for (size_t i = 0; i < rc.L.size(); ++i) d = std::max(d, double(std::abs(rc.L[i] - ra.L[i])));
+        check(d < 1e-5, "and AS STREAMED never reaches a bounce");
+    }
+
+    // ---- the automatic ceiling: GUARD gives a master louder than -14 LUFS -2 dBTP, as Spotify asks
+    {
+        auto peakOf = [&](const Run& r) {
+            lp::TruePeak tpm[2];
+            double tp = -120;
+            for (size_t i = size_t(4 * kFs); i < r.L.size(); ++i) tp = std::max({tp, lq::gainToDb(tpm[0].process(r.L[i])), lq::gainToDb(tpm[1].process(r.R[i]))});
+            return tp;
+        };
+        auto at = [&](float target, bool guard, double& ceil) {
+            auto e = engine();
+            e->setMeasuredInput(lufs(s.L, s.R), true);
+            e->setKnee(-6, true);
+            Values w = v;
+            w[lTarget] = target; w[lGuard] = guard ? 1.0f : 0.0f; w[oDither] = 0.0f;
+            const Run r = run(*e, s, w, 512);
+            ceil = e->meters().ceilingDb.load();
+            return peakOf(r);
+        };
+        double c1 = 0, c2 = 0, c3 = 0;
+        const double loudGuard = at(-9.0f, true, c1), loudOpen = at(-9.0f, false, c2);
+        at(-15.0f, true, c3);
+        check(std::abs(c1 + 2) < 0.01 && loudGuard <= -2 + 0.15 && std::abs(c2 + 1) < 0.01 && loudOpen > -1.6 && std::abs(c3 + 1) < 0.01,
+              "a loud master gets a -2 dBTP ceiling with GUARD on, -1 without it, and a quiet one keeps -1",
+              "-9 LUFS: peaks " + num(loudGuard, 2) + " dBTP with GUARD, " + num(loudOpen, 2) + " without");
     }
 
     // ---- the bar map: each bar counts once, so a loop of the chorus can't pass for the song

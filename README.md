@@ -26,14 +26,14 @@ under the desk at a quarter turn of the latch.
 
 | Step | What | State |
 | --- | --- | --- |
-| 1 | Engine: CLEAN, TONE, DYNAMICS, COLOUR, STEREO, LOUDNESS (learnt drive, true-peak limiter, clipper, GUARD), OUTPUT (LISTEN ON, dither, MONITOR, matched IN switches), SPACE | **done, tested** |
+| 1 | Engine: CLEAN, TONE, DYNAMICS, COLOUR, STEREO, LOUDNESS (learnt drive, true-peak limiter, clipper, GUARD and its automatic ceiling), OUTPUT (LISTEN ON, dither, MONITOR, loudness-matched IN switches), SPACE | **done, tested** |
 | 2 | Sections: eight named keys, the song map, per-section settings (loudness TARGET included), glides, FOLLOW, editing the map on the screen (pick, retype, split, join, mark at the playhead) | **done, tested** |
-| 3 | Assistant: the listening pass, balance against a genre, your references or your own masters; moves, the loudness knee, section lift, checks, mix notes, LEARN | **done, tested** |
+| 3 | Assistant: the listening pass (by itself on a new song's first play), balance against a genre, your references or your own masters; moves, the loudness knee, section lift, checks, mix notes, LEARN; style curves calibrated on released records | **done, tested** |
 | 4 | TONE as a four-band mastering EQ (low, mud, presence, air) with set frequencies, mid/side per band and linear phase; GLUE's attack, release and ratio; the limiter's style and release | **done, tested** |
-| 5 | BEFORE (the mix, lined up and loudness-matched), gain-reduction traces, an input meter, the song's loudness bar by bar | **done, tested** |
-| 6 | CODEC: the master through Apple's AAC encoder and back, with the true peak after encoding | **done** (Mac only; tested in the Mac build) |
+| 5 | COMPARE: MIX (the mix, lined up), MASTER or REF (a reference song in time with it), all at the master's loudness; gain-reduction traces, an input meter, the song's loudness bar by bar | **done, tested** |
+| 6 | AS STREAMED: the master through Apple's AAC encoder and back, turned to Spotify's or Apple Music's level, with the true peak after encoding | **done** (the encoder is Mac only; tested in the Mac build) |
 | 7 | Faceplate art: bare panel, SPACE tray, lit patches, selector | **done at preview quality**; final-quality render to do |
-| 8 | The plugin (JUCE, Audio Unit): six screen pages, sections, the tray, presets, A/B and BLIND, references (dropped or chosen) and styles made from them, hover help that folds away, a value beside a turning knob, window sizes | **done** |
+| 8 | The plugin (JUCE, Audio Unit): six screen pages, sections, the tray, presets, A/B and blind A/B, references (dropped or chosen) and styles made from them, hover help that folds away, a value beside a turning knob, window sizes | **done** |
 | 9 | Mac build, auval and pluginval on every push | **running** |
 
 ## Installing
@@ -65,12 +65,28 @@ the side. In natural phase it adds no delay and can work dynamically; in linear 
 it is one symmetric FIR on the mid and one on the side (48 ms of delay at 44.1/48 kHz),
 rebuilt off the audio thread and crossfaded in as the settings move.
 
-**BEFORE** plays the mix as it came in, delayed to line up with the master and turned
-to the master's loudness, so you compare the sound and not the level. **CODEC** (Mac)
-runs the master through Apple's AAC encoder and back on a worker thread, at 256 or 128
-kbps, and shows the true peak after encoding. Both are for listening only: neither
-reaches a bounce, and the codec's own few thousand samples of delay aren't reported to
-the host.
+**COMPARE** is one of three: MIX plays the mix as it came in, delayed to line up with
+the master; MASTER is what the bounce gets; REF plays a reference song (chosen the first
+time you press it, or from the SET menu) at the same point in time, wrapped round if
+it's shorter. MIX and REF are turned to the master's loudness (REF from its integrated
+loudness, measured when it's read in), so you compare the sound and not the level.
+**AS STREAMED** plays the master the way Spotify (-14 LUFS) or Apple Music (-16 LUFS)
+will: through Apple's AAC encoder and back on a worker thread (Mac), then turned down
+if it's louder than the service's level, or up if it's quieter, only as far as its true
+peak leaves 1 dB. The DETAIL screen shows what each service does to it and the true
+peak after encoding. None of these reaches a bounce, and the encoder's few thousand
+samples of delay aren't reported to the host.
+
+**The automatic ceiling.** With GUARD on, the limiter's ceiling drops to -2 dBTP when
+the master is aimed louder than -14 LUFS (Spotify asks for this: loud masters pick up
+more overs when encoded). The knob still sets it otherwise, and the TRUE PEAK check
+reads against the ceiling in force.
+
+**Starting by itself.** A new Lacquer listens on the song's first play without LISTEN
+being pressed. Once it has heard at least 40 seconds and the song stops, it takes the
+moves it's at least 70% sure of (at AMOUNT) and leaves the rest on MOVES. It does this
+once per instance, never in a saved session, and SET > "Start the assistant by itself"
+turns it off.
 
 **The listening pass** feeds the input, before any processing, to a 4096-point
 analyser in sixth-octave bands (mid and side), a BS.1770 loudness meter, a peak

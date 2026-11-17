@@ -104,6 +104,10 @@ LacquerProcessor::LacquerProcessor()
     engine_.setMonitorTap(&codec_);
     loadTaste();
     rebuildTarget();
+    {
+        juce::PropertiesFile f(settingsOptions());
+        autoStartPref_ = f.getBoolValue("autoStart", true);
+    }
     startTimerHz(15);
 }
 
@@ -125,6 +129,7 @@ void LacquerProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) {
     setLatencySamples(engine_.latencyFor(lastPhase_));
     codec_.prepare(sampleRate);
     codec_.setBitrate(juce::roundToInt(songValue(oCodecRate)) == 1 ? 128 : 256);
+    refReload_.store(true);   // idle() decodes the reference again if the rate changed
 }
 
 Values LacquerProcessor::songValues() const {
@@ -153,6 +158,7 @@ void LacquerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
             if (auto b = pos->getBpm()) t.bpm = *b > 1 ? *b : 120.0;
             if (auto ts = pos->getTimeSignature()) if (ts->denominator > 0) t.quartersPerBar = ts->numerator * 4.0 / ts->denominator;
             if (auto lb = pos->getPpqPositionOfLastBarStart()) lastBarPpq_.store(*lb);
+            if (auto ts = pos->getTimeInSeconds()) { t.seconds = *ts; t.hasSeconds = true; }
         }
     t.nonRealtime = isNonRealtime();
     playing_.store(t.playing);
@@ -169,6 +175,11 @@ void LacquerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     }
     if (t.playing && t.hasPpq) sawPpq_ = true;
     const bool stopping = wasPlaying_ && !t.playing;
+    // A fresh Lacquer listens on its first play by itself.
+    if (t.playing && !wasPlaying_ && !t.nonRealtime && autoArmed_.exchange(false) && !listenWanted_.load()) {
+        listenWanted_.store(true);
+        autoPass_ = true;
+    }
     // The listening pass.
     const bool want = listenWanted_.load();
     if (want && !engineListening_) {
@@ -193,7 +204,8 @@ void LacquerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
             return;
         }
         // GUARD's knee, from every 10 ms peak the limiter's input has seen.
-        const lq::Knee kn = lq::kneeFromPeaks(engine_.kneePeaks(), engine_.kneeWindows(), m, songValue(lCeiling), songValue(lClip));
+        const lq::Knee kn = lq::kneeFromPeaks(engine_.kneePeaks(), engine_.kneeWindows(), m, songValue(lCeiling), songValue(lClip),
+                                              songValue(lGuard) >= 0.5f);
         if (kn.known) engine_.setKnee(kn.kneeLufs, true);
         calibrated_.store(true);
     };
@@ -204,7 +216,10 @@ void LacquerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
         endPassNow = true;
     };
     if (!want && engineListening_) endPass();
-    if (stopping && engineListening_ && listenSeconds_.load() > 8.0) { listenWanted_.store(false); endPass(); }
+    // A pass ends when the song stops. One that started by itself waits until it has heard enough
+    // of the song to go on (it carries on from the next play).
+    const double enough = autoPass_ ? kAutoSeconds : 8.0;
+    if (stopping && engineListening_ && listenSeconds_.load() > enough) { listenWanted_.store(false); endPass(); }
     engine_.setListening(engineListening_);
     if (engineListening_ && t.playing) listenSeconds_.store(listenSeconds_.load() + secs);
     if (t.playing) playedSeconds_ += secs;
@@ -413,6 +428,93 @@ void LacquerProcessor::setSectionName(int key, const juce::String& n) {
 // The listening pass and the assistant
 void LacquerProcessor::setListening(bool on) {
     listenWanted_.store(on);
+    autoArmed_.store(false);
+    if (!on) autoPass_ = false;   // stopped by hand: an ordinary pass, nothing taken by itself
+    bump();
+}
+
+bool LacquerProcessor::autoStart() const { return autoStartPref_; }
+
+void LacquerProcessor::setAutoStart(bool on) {
+    autoStartPref_ = on;
+    juce::PropertiesFile f(settingsOptions());
+    f.setValue("autoStart", on);
+    f.saveIfNeeded();
+    if (!on) autoArmed_.store(false);
+    bump();
+}
+
+// COMPARE's reference: decoded, turned to the session's rate and measured, off the audio thread.
+void LacquerProcessor::choosePlayRef(const juce::File& file) {
+    refPath_ = file.getFullPathName();
+    const double rate = sampleRate_;
+    refLoading_.fetch_add(1);
+    bump();
+    pool_.addJob([this, alive = alive_, file, rate] {
+        auto ref = std::make_unique<RefAudio>();
+        {
+            juce::AudioFormatManager fm;
+            fm.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> r(fm.createReaderFor(file));
+            if (r && r->lengthInSamples > 0 && r->sampleRate > 0) {
+                const juce::int64 total = std::min<juce::int64>(r->lengthInSamples, juce::int64(r->sampleRate * 600));
+                juce::AudioBuffer<float> in(2, int(total));
+                r->read(&in, 0, int(total), 0, true, r->numChannels > 1);
+                if (r->numChannels == 1) in.copyFrom(1, 0, in, 0, 0, int(total));
+                const double ratio = r->sampleRate / rate;
+                const int outN = int(double(total) / ratio);
+                ref->L.resize(size_t(outN)); ref->R.resize(size_t(outN));
+                if (std::abs(ratio - 1.0) < 1e-9) {
+                    std::copy(in.getReadPointer(0), in.getReadPointer(0) + outN, ref->L.begin());
+                    std::copy(in.getReadPointer(1), in.getReadPointer(1) + outN, ref->R.begin());
+                } else {
+                    juce::WindowedSincInterpolator li, ri;
+                    li.process(ratio, in.getReadPointer(0), ref->L.data(), outN, int(total), 0);
+                    ri.process(ratio, in.getReadPointer(1), ref->R.data(), outN, int(total), 0);
+                }
+                // Its integrated loudness, as COMPARE will match it.
+                KeyStats ks;
+                KLevel k;
+                k.prepare(rate);
+                const int len = int(0.1 * rate);
+                double sub = 0, q[4]{};
+                int cnt = 0, qi = 0;
+                for (size_t i = 0; i < ref->L.size() && alive->load(); ++i) {
+                    const double l = k.rlb[0].process(k.pre[0].process(ref->L[i])), rr = k.rlb[1].process(k.pre[1].process(ref->R[i]));
+                    sub += l * l + rr * rr;
+                    if (++cnt == len) {
+                        q[qi & 3] = sub / len;
+                        if (++qi >= 4) ks.blocks.push_back(-0.691 + 10 * std::log10(0.25 * (q[0] + q[1] + q[2] + q[3]) + 1e-20));
+                        sub = 0; cnt = 0;
+                    }
+                }
+                ref->lufs = ks.integrated();
+            }
+        }
+        if (!alive->load()) return;
+        const std::lock_guard<std::mutex> lock(refMutex_);
+        refReady_ = std::move(ref);   // idle() puts it in place
+        refReadyRate_ = rate;
+    });
+}
+
+// On the message thread: a decoded reference goes in, the one it replaces is kept a while.
+void LacquerProcessor::adoptPlayRef() {
+    std::unique_ptr<RefAudio> got;
+    double rate = 0;
+    {
+        const std::lock_guard<std::mutex> lock(refMutex_);
+        if (!refReady_) return;
+        got = std::move(refReady_);
+        rate = refReadyRate_;
+    }
+    refLoading_.fetch_sub(1);
+    if (got->L.size() < size_t(rate)) { lastNote = "COULD NOT PLAY THAT FILE"; bump(); return; }
+    if (refAudio_) refGrave_.push_back({std::move(refAudio_), juce::Time::getMillisecondCounter()});
+    refAudio_ = std::move(got);
+    refRate_ = rate;
+    engine_.setReference(refAudio_.get());
+    lastNote = "REF: " + playRefName().toUpperCase();
     bump();
 }
 
@@ -423,6 +525,14 @@ void LacquerProcessor::idle() {
     const int kbps = juce::roundToInt(songValue(oCodecRate)) == 1 ? 128 : 256;
     if (kbps != codec_.kbps()) { codec_.setBitrate(kbps); bump(); }
     if (passReady_.exchange(false)) finishPass();
+    adoptPlayRef();
+    if (refReload_.exchange(false) && refPath_.isNotEmpty() && std::abs(refRate_ - sampleRate_) > 0.5 && refLoading_.load() == 0)
+        choosePlayRef(juce::File(refPath_));
+    // References replaced a while ago: the audio thread has long stopped reading them.
+    const auto now = juce::Time::getMillisecondCounter();
+    refGrave_.erase(std::remove_if(refGrave_.begin(), refGrave_.end(), [now](const Retired& r) { return now - r.at > 2000; }), refGrave_.end());
+    // A fresh instance arms the auto-start once it can (the setting is read off the audio thread).
+    if (autoPending_.load() && !haveStats_ && !autoArmed_.load() && !listenWanted_.load() && autoStart()) autoArmed_.store(true);
     if (calibrated_.exchange(false)) bump();
     const float amt = songValue(aAmount);
     if (std::abs(amt - lastAmount_) > 1e-4f) { lastAmount_ = amt; applyAmount(); }
@@ -434,6 +544,19 @@ void LacquerProcessor::finishPass() {
     lastStats_ = engine_.analyser().stats();   // the audio thread has stopped feeding it
     haveStats_ = lastStats_.key[0].frames >= 8;
     if (haveStats_) runAssistant();
+    if (haveStats_) { autoPending_.store(false); autoArmed_.store(false); }   // it has heard the song: nothing more by itself
+    if (autoPass_ && haveStats_) {
+        autoPass_ = false;
+        int took = 0, left = 0;
+        for (int i = 0; i < int(result_.moves.size()); ++i) {
+            if (result_.moves[size_t(i)].conf >= kAutoConfidence) { takeMove(i, true); ++took; }
+            else ++left;
+        }
+        lastNote = took == 0 ? juce::String("HEARD THE SONG: NOTHING IT'S SURE OF. ") + juce::String(left) + " IDEAS ON MOVES"
+                             : "HEARD THE SONG: TOOK " + juce::String(took) + (took == 1 ? " MOVE" : " MOVES") +
+                                   (left > 0 ? ", " + juce::String(left) + " MORE ON MOVES" : juce::String());
+        page = 2;
+    }
     bump();
 }
 
@@ -816,6 +939,8 @@ void LacquerProcessor::loadPreset(const juce::File& f) {
 void LacquerProcessor::getStateInformation(juce::MemoryBlock& destData) {
     juce::ValueTree root("lacquer");
     root.setProperty("version", JucePlugin_VersionString, nullptr);
+    root.setProperty("autoPending", autoPending_.load(), nullptr);
+    root.setProperty("playRef", refPath_, nullptr);
     root.appendChild(apvts.copyState(), nullptr);
     // Sections.
     juce::ValueTree sec("sections");
@@ -903,6 +1028,12 @@ void LacquerProcessor::setStateInformation(const void* data, int sizeInBytes) {
     if (!xml) return;
     const auto root = juce::ValueTree::fromXml(*xml);
     if (!root.hasType("lacquer")) return;
+    // A saved session has been worked on: it doesn't start the assistant by itself (one from before
+    // 0.4 never asked to).
+    autoPending_.store(bool(root.getProperty("autoPending", false)));
+    if (!autoPending_.load()) autoArmed_.store(false);
+    if (const auto ref = root.getProperty("playRef").toString(); ref.isNotEmpty() && ref != refPath_ && juce::File(ref).existsAsFile())
+        choosePlayRef(juce::File(ref));
     if (auto p = root.getChildWithName(apvts.state.getType()); p.isValid()) apvts.replaceState(p);
     const auto sec = root.getChildWithName("sections");
     juce::ValueTree snap("snapshot");
@@ -982,6 +1113,7 @@ void LacquerProcessor::setStateInformation(const void* data, int sizeInBytes) {
     for (const auto& c : ui) if (c.hasType("snapshot")) abState_[juce::jlimit(0, 1, int(c.getProperty("slot", 0)))] = c.createCopy();
     lastAmount_ = songValue(aAmount);
     lastTarget_ = juce::roundToInt(songValue(aTarget));
+    if (result_.any) { autoPending_.store(false); autoArmed_.store(false); }
     bump();
 }
 

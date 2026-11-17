@@ -18,7 +18,9 @@ The first time: play the song through once. Lacquer learns how loud
 it is and from then on lands it on TARGET (under LOUDNESS).
 
 The assistant:
-  LISTEN, then play the song through once and stop.
+  A new Lacquer listens by itself on the first play: play the song
+  through once and stop. It takes the moves it's sure of and lists
+  the rest on MOVES. Later, LISTEN starts another pass.
   MOVES (screen key) lists its suggestions: click one to take or skip
   it, or press TAKE ALL. AMOUNT scales the moves you have taken.
   BALANCE shows the song against the target; LOUDNESS shows where
@@ -51,17 +53,24 @@ and down: gain); the arrows put a band on the mid or the side, and
 PHASE switches to linear. DYNAMICS: glue's attack, release, ratio.
 LOUDNESS: the limiter's style and release, gain reduction, and how
 much of the song the loudness was learnt from (FORGET after a new
-mix). OUTPUT: the input meter, the codec and its bit rate.
+mix). OUTPUT: the input meter, what Spotify and Apple Music would
+do to the level, the encoder's true peak and bit rate.
 
-BEFORE (under the meters): the mix as it came in, at the master's
-loudness. CODEC: the master through Apple's AAC encoder and back.
-Neither is ever printed into a bounce.
+COMPARE (bottom of OUTPUT): MIX is the mix as it came in, MASTER the
+master, REF a reference song (it asks for one the first time; SET
+changes it), all at the master's loudness.
+AS STREAMED: the master through Apple's AAC encoder and turned to
+Spotify's or Apple Music's level, as a listener hears it.
+None of these is ever printed into a bounce.
+With GUARD on, a master louder than -14 LUFS gets a -2 dBTP ceiling.
 
 The SPACE tray: give the latch at the bottom left a quarter turn.
 
 Knobs: drag up or right, Shift for fine, double-click to reset.
 Click a selector switch to step it round (Alt-click steps back).
-SET (bottom rail): window size, save a preset, name the sections.
+SET (bottom rail): window size, save a preset, name the sections,
+the reference COMPARE plays, blind A/B, and whether the assistant
+starts by itself.
 Click the INTEGRATED readout to start its count again.
 
 Point at any control and the strip under the faceplate says what it

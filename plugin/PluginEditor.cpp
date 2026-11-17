@@ -177,7 +177,9 @@ bool LacquerEditor::lit(int ci) const {
         for (int m = 0; m < 6; ++m) if (startsWith(c.id, kModules[m]) && c.id[std::strlen(kModules[m])] == '_') return proc_.ideaCount(m) > 0;
     if (is(c, "guarding")) return proc_.meters().guarding.load();
     if (is(c, "over")) return clock_ < overUntil_;
-    if (is(c, "o_blind")) return proc_.blind();
+    if (is(c, "o_cmp_mix")) return compareIndex() == 0;
+    if (is(c, "o_cmp_master")) return compareIndex() == 1;
+    if (is(c, "o_cmp_ref")) return compareIndex() == 2;
     if (is(c, "power")) return true;
     if (is(c, "space_on")) return proc_.meters().spaceActive.load();
     if (is(c, "ab_a")) return !proc_.blind() && proc_.abSlot() == 0;
@@ -251,7 +253,7 @@ void LacquerEditor::click(int ci, const juce::MouseEvent& e) {
     if (is(c, "sec_follow")) { proc_.setFollow(!proc_.follow()); repaint(); return; }
     if (is(c, "a_listen")) { proc_.setListening(!proc_.listening()); repaint(); return; }
     if (is(c, "a_take")) { proc_.takeAll(); proc_.page = 2; repaint(); return; }
-    if (is(c, "o_blind")) { proc_.setBlind(!proc_.blind()); repaint(); return; }
+    if (is(c, "o_cmp_mix") || is(c, "o_cmp_master") || is(c, "o_cmp_ref")) { setCompare(is(c, "o_cmp_mix") ? 0 : is(c, "o_cmp_master") ? 1 : 2); return; }
     if (is(c, "ab_a") || is(c, "ab_b")) { proc_.selectAb(is(c, "ab_a") ? 0 : 1); repaint(); return; }
     if (is(c, "menu")) { showSetMenu(); return; }
     if (is(c, "preset_prev") || is(c, "preset_next")) { stepPreset(is(c, "preset_next") ? 1 : -1); return; }
@@ -271,6 +273,37 @@ void LacquerEditor::click(int ci, const juce::MouseEvent& e) {
         endEdit(p);
     }
     repaintPts(boundsOf(ci));
+}
+
+int LacquerEditor::compareIndex() const { return juce::jlimit(0, 2, juce::roundToInt(proc_.songValue(lq::oCompare))); }
+
+// COMPARE: MIX, MASTER or REF. REF with no reference yet asks for one first.
+void LacquerEditor::setCompare(int idx) {
+    auto set = [this](int i) {
+        proc_.param(lq::oCompare)->beginChangeGesture();
+        proc_.setSong(lq::oCompare, float(i));
+        proc_.param(lq::oCompare)->endChangeGesture();
+        followDetail(lq::oCompare);
+        repaint();
+    };
+    if (idx == 2 && !proc_.hasPlayRef() && !proc_.playRefLoading()) { chooseRefToPlay(true); return; }
+    set(idx);
+}
+
+void LacquerEditor::chooseRefToPlay(bool thenCompare) {
+    chooser_ = std::make_unique<juce::FileChooser>("A reference to compare with", juce::File(proc_.playRefPath()).getParentDirectory(),
+                                                   "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg");
+    chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this, thenCompare](const juce::FileChooser& fc) {
+        const auto f = fc.getResult();
+        if (!f.existsAsFile()) return;
+        proc_.choosePlayRef(f);
+        if (thenCompare) {
+            proc_.param(lq::oCompare)->beginChangeGesture();
+            proc_.setSong(lq::oCompare, 2.0f);
+            proc_.param(lq::oCompare)->endChangeGesture();
+        }
+        repaint();
+    });
 }
 
 void LacquerEditor::showSetMenu() {
@@ -295,6 +328,9 @@ void LacquerEditor::showSetMenu() {
     m.addItem("Forget my masters (" + juce::String(proc_.numMine()) + ")", proc_.numMine() > 0, false, [this] { proc_.clearMine(); repaint(); });
     m.addItem("Clear the references (" + juce::String(proc_.numRefs()) + ")", proc_.numRefs() > 0, false, [this] { proc_.clearReferences(); repaint(); });
     m.addItem("Name the sections...", [this] { renameSections(); });
+    m.addItem("Choose the reference COMPARE plays...", [this] { chooseRefToPlay(false); });
+    m.addItem("Blind A / B: shuffle A and B, pick by ear", true, proc_.blind(), [this] { proc_.setBlind(!proc_.blind()); repaint(); });
+    m.addItem("Start the assistant by itself on a new song", true, proc_.autoStart(), [this] { proc_.setAutoStart(!proc_.autoStart()); });
     m.addItem("Reset the integrated loudness", [this] { proc_.resetIntegrated(); });
     m.addItem("Forget the song's loudness (a new mix)", [this] { proc_.forgetLoudness(); repaint(); });
     m.addSeparator();
@@ -668,7 +704,7 @@ void LacquerEditor::drawChecks(juce::Graphics& g) {
     const auto& r = proc_.result();
     struct Row { juce::String name, what; bool ok; };
     std::vector<Row> rows;
-    const float tp = proc_.meters().peakHold.load(), ceil = proc_.songValue(lq::lCeiling);
+    const float tp = proc_.meters().peakHold.load(), ceil = proc_.meters().ceilingDb.load();
     if (tp > -100) rows.push_back({"TRUE PEAK", num1(tp) + " dBTP against a ceiling of " + num1(ceil), tp <= ceil + 0.05f});
     else rows.push_back({"TRUE PEAK", "play the song to measure it", true});
     for (const auto& c : r.checks) rows.push_back({juce::String::fromUTF8(c.name.c_str()), juce::String::fromUTF8(c.what.c_str()), c.ok});
@@ -1010,7 +1046,7 @@ void LacquerEditor::followDetail(int p) {
     else if (m == 2) tab = 1;
     else if (p >= lq::loudIn && p <= lq::lGuard) tab = 2;
     else if (p == lq::lStyle || p == lq::lRelease) tab = 2;
-    else if (p == lq::oListen || p == lq::oCodec || p == lq::oDither || p == lq::oMonitor || p == lq::oMatch || p == lq::oBefore || p == lq::oCodecRate) tab = 3;
+    else if (p == lq::oListen || p == lq::oStream || p == lq::oDither || p == lq::oMonitor || p == lq::oCompare || p == lq::oCodecRate) tab = 3;
     else if (p >= lq::tMud && p <= lq::tPhase) tab = 0;
     else if (p >= lq::dAttack && p <= lq::dRatio) tab = 1;
     if (tab >= 0 && tab != proc_.detailTab) { proc_.detailTab = tab; if (proc_.page == 5) repaintPts({kFaceX, kFaceY, kFaceW, kFaceH}); }
@@ -1147,24 +1183,33 @@ void LacquerEditor::drawDetail(juce::Graphics& g) {
         ink.text(num1(mt.inLufs.load()) + " LUFS SHORT-TERM   " + num1(mt.inPeak.load()) + " dBFS PEAK", 70, 76, 11.0f, 0, 0.85f);
         ink.text("OUT", 14, 92, 11.0f, 0, 1.0f);
         ink.text(num1(mt.stLufs.load()) + " LUFS SHORT-TERM   " + num1(outPkHold_) + " dBTP PEAK", 70, 92, 11.0f, 0, 0.85f);
-        ink.text("BEFORE", 14, 108, 11.0f, 0, 1.0f);
-        ink.text("the mix turned " + num1(mt.beforeDb.load(), true) + " dB to match the master", 70, 108, 11.0f, 0, 0.85f);
+        ink.text("COMPARE", 14, 108, 11.0f, 0, 1.0f);
+        {
+            const int cmp = compareIndex();
+            juce::String t = "MIX: the mix turned " + num1(mt.beforeDb.load(), true) + " dB to match the master";
+            if (cmp == 2 || proc_.hasPlayRef())
+                t = proc_.playRefLoading() ? juce::String("REF: reading the reference...")
+                    : proc_.hasPlayRef() ? "REF: " + proc_.playRefName().substring(0, 22) + ", " + num1(mt.refDb.load(), true) + " dB to match"
+                                         : juce::String("REF: choose a reference in the SET menu");
+            ink.text(t, 70, 108, 10.5f, 0, 0.85f);
+        }
         const bool avail = proc_.codecAvailable();
-        ink.text("CODEC", 14, 124, 11.0f, 0, 1.0f);
-        if (!avail) ink.text(proc_.codecWhy(), 70, 124, 10.5f, 0, 0.7f);
-        else if (proc_.songValue(lq::oCodec) < 0.5f) ink.text("off: switch CODEC on to hear the master after encoding", 70, 124, 10.5f, 0, 0.7f);
+        ink.text("STREAMED", 14, 124, 11.0f, 0, 1.0f);
+        ink.text("SPOTIFY " + num1(mt.spotifyDb.load(), true) + " dB   APPLE MUSIC " + num1(mt.appleDb.load(), true) + " dB", 70, 124, 10.5f, 0, 0.85f);
+        if (!avail) ink.text(proc_.codecWhy(), 70, 140, 10.5f, 0, 0.7f);
+        else if (proc_.songValue(lq::oStream) < 0.5f) ink.text("off: AS STREAMED plays it through the encoder too", 70, 140, 10.5f, 0, 0.7f);
         else {
             const float cp = proc_.codecPeak();
-            ink.text("after encoding the true peak reaches " + (cp > -100 ? num1(cp) + " dBTP" : juce::String("--")), 70, 124, 10.5f, 0, 0.85f);
-            if (cp > -0.05f) ink.text("OVER: LOWER THE CEILING", 366, 140, 10.5f, 2, 1.0f);
+            ink.text("after encoding the true peak reaches " + (cp > -100 ? num1(cp) + " dBTP" : juce::String("--")), 70, 140, 10.5f, 0, 0.85f);
+            if (cp > -0.05f) ink.text("OVER: LOWER THE CEILING", 366, 108, 10.5f, 2, 1.0f);
         }
         for (int i = 0; i < 1; ++i) {
             const float y = 156;
             ink.text(kOutRows[i].name, 14, y, 11.0f, 0, 1.0f);
             arrows(y, valueOf(kOutRows[i].p), avail);
         }
-        ink.text("The codec preview is for listening only: a little later than the song, never in a bounce.", 14, 186, 10.0f, 0, 0.6f, kText, 0.0f);
-        ink.text("BEFORE and LISTEN ON never reach a bounce either.", 14, 199, 10.0f, 0, 0.6f, kText, 0.0f);
+        ink.text("Streaming turns a loud master down and a quiet one up (as far as its peaks allow).", 14, 186, 10.0f, 0, 0.6f, kText, 0.0f);
+        ink.text("COMPARE, AS STREAMED and LISTEN ON are for listening only: never in a bounce.", 14, 199, 10.0f, 0, 0.6f, kText, 0.0f);
         l2 = "WHAT COMES IN, WHAT GOES OUT, AND HOW IT WILL BE HEARD";
     }
     header(g, l1, l2);

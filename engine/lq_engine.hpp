@@ -65,8 +65,14 @@ private:
 };
 
 struct Transport {
-    bool playing = false, hasPpq = false, nonRealtime = false;
-    double ppq = 0, bpm = 120, quartersPerBar = 4;
+    bool playing = false, hasPpq = false, nonRealtime = false, hasSeconds = false;
+    double ppq = 0, bpm = 120, quartersPerBar = 4, seconds = 0;
+};
+
+// A reference song for COMPARE's REF: decoded at the engine's rate, with its own integrated loudness.
+struct RefAudio {
+    std::vector<float> L, R;
+    double lufs = -70;
 };
 
 // Readings for the faceplate, written by the audio thread.
@@ -75,6 +81,9 @@ struct Meters {
     std::atomic<float> driveDb{0}, gr{0}, harshCut{0};
     // The most gain reduction since the window last looked (it swaps them back to 0), the input, BEFORE.
     std::atomic<float> glueGrMax{0}, limGrMax{0}, inLufs{-70}, inPeak{-120}, beforeDb{0}, codecPeak{-120}, safetyDb{0};
+    // The ceiling in force (GUARD lowers it for loud masters); REF's level change; what Spotify and
+    // Apple Music would do to the master's level (AS STREAMED).
+    std::atomic<float> ceilingDb{-1}, refDb{0}, spotifyDb{0}, appleDb{0}, masterLufs{-70};
     std::atomic<bool> guarding{false}, over{false}, learning{true}, spaceActive{false};
     std::atomic<int> key{0};
     std::atomic<float> corr{1};
@@ -147,7 +156,7 @@ public:
         for (auto& s : sat_) s.reset();
         comp_.reset(); width_.reset(); space_.reset(); lim_.reset(); dither_.reset(); listen_.reset();
         outK_.reset(); limInK_.reset(); inK_.reset(); lin_.reset();
-        dry_[0].clear(); dry_[1].clear(); beforeR_.reset();
+        dry_[0].clear(); dry_[1].clear(); beforeR_.reset(); streamR_.reset(); refW_ = 0; refPos_ = 0; ceilInit_ = false;
         barIdx_ = -1; barOutPw_ = barMixPw_ = barDrive_ = 0; barOutN_ = barMixN_ = 0;
         for (auto& t : tp_) t.reset();
         colDry_[0].clear(); colDry_[1].clear();
@@ -164,6 +173,29 @@ public:
     int latencyFor(bool linear) const { return kSub + sat_[0].latency() + comp_.latency() + lim_.latency() + (linear ? lin_.latency() : 0); }
     int latency() const { return latencyFor(linearOn_); }
     void setMonitorTap(MonitorTap* t) { tap_ = t; }
+    // COMPARE's reference. The caller keeps it alive until a while after it is replaced.
+    void setReference(const RefAudio* r) { ref_.store(r); }
+    const RefAudio* reference() const { return ref_.load(); }
+    // How loud the master plays: this play's integrated output once there's enough of it, else
+    // where LOUDNESS aims it.
+    double masterLufs(const Values& song) const {
+        if (passOut_.seconds > 10) return passOut_.integrated();
+        if (song[loudIn] > 0.5f) return songAim(song);
+        return measuredKnown_ ? measured_ : -14.0;
+    }
+    // The song's target as LOUDNESS uses it: GUARD holds it at the knee, or -13 before it knows one.
+    double songAim(const Values& song) const {
+        double a = song[lTarget];
+        if (song[lGuard] > 0.5f && kneeKnown_ && a > knee_) a = knee_;
+        if (song[lGuard] > 0.5f && !kneeKnown_ && a > kSafeTarget) a = kSafeTarget;
+        return a;
+    }
+    // Streaming normalisation: down to the service's level; up only as far as the peaks leave 1 dB.
+    static double streamGain(double refLufs, double masterLufs, double masterTp) {
+        double g = refLufs - masterLufs;
+        if (g > 0) g = std::max(0.0, std::min(g, -1.0 - masterTp));
+        return g;
+    }
     BarLevels& bars() { return bars_; }
     const BarLevels& bars() const { return bars_; }
 
@@ -210,6 +242,7 @@ public:
             if (++fill_ == kSub) {
                 Transport tt = t;
                 if (t.hasPpq) tt.ppq = t.ppq + double(i + 1 - kSub) / fs_ * t.bpm / 60.0;
+                if (t.hasSeconds) tt.seconds = t.seconds + double(i + 1 - kSub) / fs_;
                 std::memcpy(outBuf_[0], inBuf_[0], sizeof(inBuf_[0]));
                 std::memcpy(outBuf_[1], inBuf_[1], sizeof(inBuf_[1]));
                 processSub(outBuf_[0], outBuf_[1], kSub, song, tt);
@@ -391,7 +424,6 @@ private:
                 if (ins[m] > 0.99f && probeIn_[m].db > -60) contrib_[m] = contrib_[m] + (clamp(probeOut_[m].db - probeIn_[m].db, -12.0, 12.0) - contrib_[m]) * 0.002;
                 compDb += (1.0 - ins[m]) * contrib_[m];
             }
-            if (song[oMatch] < 0.5f) compDb = 0;
             float cg[kSub];
             compR_.set(float(dbToGain(compDb)), n, cg);
             for (int i = 0; i < n; ++i) { L[i] *= cg[i]; R[i] *= cg[i]; }
@@ -449,6 +481,13 @@ private:
         }
         driveEff_ = driveNow_ + safety_;
         if (t.playing) { passDriveSum_ += driveEff_; passDriveN_ += 1; }
+        // The ceiling in force, eased in when GUARD moves it.
+        {
+            const double want = ceilingFor(song, songAim(song));
+            if (!ceilInit_) { ceilSm_ = want; ceilInit_ = true; }
+            ceilSm_ += (want - ceilSm_) * (1 - std::pow(tcCoef(0.3, fs_), n));
+            meters_.ceilingDb.store(float(ceilSm_));
+        }
         meters_.driveDb.store(float(driveEff_));
         meters_.safetyDb.store(float(safety_));
         meters_.guarding.store(guarding);
@@ -457,7 +496,7 @@ private:
             lp::LimParams lpm;
             const bool on = song[loudIn] > 0.5f;
             lpm.gainDb = on ? float(driveEff_) : 0.0f;
-            lpm.ceilingDb = on ? song[lCeiling] : 0.0f;
+            lpm.ceilingDb = on ? float(ceilSm_) : 0.0f;
             lpm.clip = on && song[lClip] > 0.05f ? 1.0f : 0.0f;
             lpm.clipAmt = song[lClip] / 10.0f;
             // Styles: CLEAN holds on and lets go slowly; PUNCHY reacts late and lets go sooner, so the hits
@@ -491,9 +530,14 @@ private:
         meters_.truePeak.store(float(tpDb));
         meters_.peakHold.store(float(peakTp_));
         meters_.integrated.store(float(passOut_.seconds > 1 ? passOut_.integrated() : -70.0));
-        meters_.over.store(tpDb > song[lCeiling] + 0.05);
+        meters_.over.store(tpDb > ceilSm_ + 0.05);
 
-        // BEFORE: the song as it came in, lined up and turned to the master's loudness.
+        // COMPARE: MIX (the song as it came in), MASTER, or REF (a reference song), each at the
+        // master's loudness. Listening only.
+        const int cmp = clamp(int(song[oCompare] + 0.5f), 0, 2);
+        const double master = masterLufs(song);
+        meters_.masterLufs.store(float(master));
+        // MIX: the song as it came in, lined up and turned to the master's loudness.
         {
             if (inK_.db > -50 && outK_.db > -50) {
                 const double want = clamp(outK_.db - inK_.db, -12.0, 30.0);
@@ -501,7 +545,7 @@ private:
             }
             meters_.beforeDb.store(float(beforeDb_));
             float bw[kSub];
-            beforeR_.set(aids && song[oBefore] > 0.5f ? 1.0f : 0.0f, n, bw);
+            beforeR_.set(aids && cmp == 0 ? 1.0f : 0.0f, n, bw);
             if (beforeR_.cur > 0.0f || bw[0] > 0.0f) {
                 const size_t lat = size_t(latency() - kSub + n - 1);
                 const double g = dbToGain(beforeDb_);
@@ -512,8 +556,50 @@ private:
                 }
             }
         }
-        // The codec preview: what the listener's encoder makes of it.
-        if (aids && tap_ && song[oCodec] > 0.5f) tap_->process(L, R, n);
+        // REF: the reference song at the same point in time (or wrapped round, if it's shorter).
+        {
+            const RefAudio* ref = ref_.load();
+            const bool have = ref && ref->L.size() > size_t(fs_);
+            const float want = aids && cmp == 2 && have ? 1.0f : 0.0f;
+            if (have) {
+                const double g = clamp(master - ref->lufs, -30.0, 24.0);
+                if (refW_ <= 0.0f) refDb_ = g;   // switching to it: no slide in level
+                refDb_ += (g - refDb_) * (1 - std::pow(tcCoef(1.0, fs_), n));
+                meters_.refDb.store(float(refDb_));
+            }
+            if (want > 0.0f || refW_ > 0.0f) {
+                const float step = float(1.0 / (0.02 * fs_));
+                const double gain = have ? dbToGain(refDb_) : 0.0;
+                const int64_t len = have ? int64_t(ref->L.size()) : 1;
+                // What leaves this sub-block reaches the host kSub samples on, and the host plays it latency() early.
+                int64_t pos = t.hasSeconds ? int64_t(std::llround(t.seconds * fs_)) + kSub - latency() : refPos_;
+                for (int i = 0; i < n; ++i) {
+                    refW_ = std::clamp(refW_ + std::clamp(want - refW_, -step, step), 0.0f, 1.0f);
+                    double rl = 0, rr = 0;
+                    if (have && t.playing) {
+                        const int64_t k = ((pos + i) % len + len) % len;
+                        rl = ref->L[size_t(k)] * gain; rr = ref->R[size_t(k)] * gain;
+                    }
+                    L[i] = float(L[i] + refW_ * (rl - L[i]));
+                    R[i] = float(R[i] + refW_ * (rr - R[i]));
+                }
+            }
+            if (t.playing) refPos_ += n;
+        }
+        // AS STREAMED: through the listener's encoder, then turned to Spotify's -14 or Apple Music's -16
+        // LUFS the way each does it. Both are worked out all the time, for the screen.
+        {
+            const double tpk = peakTp_ > -100 ? peakTp_ : ceilSm_;
+            const double gs = streamGain(-14.0, master, tpk), ga = streamGain(-16.0, master, tpk);
+            meters_.spotifyDb.store(float(gs));
+            meters_.appleDb.store(float(ga));
+            const int stream = aids ? clamp(int(song[oStream] + 0.5f), 0, 2) : 0;
+            if (stream > 0 && tap_) tap_->process(L, R, n);
+            float sg[kSub];
+            streamR_.set(stream == 1 ? float(dbToGain(gs)) : stream == 2 ? float(dbToGain(ga)) : 1.0f, n, sg);
+            if (stream > 0 || sg[0] != 1.0f)
+                for (int i = 0; i < n; ++i) { L[i] *= sg[i]; R[i] *= sg[i]; }
+        }
 
         // Listening aids: never in an offline bounce.
         if (aids) {
@@ -603,8 +689,12 @@ private:
     LinearTone lin_;
     bool linearOn_ = false;
     lp::Delay dry_[2];
-    Ramp beforeR_;
-    double beforeDb_ = 0, inPk_ = 0;
+    Ramp beforeR_, streamR_;
+    double beforeDb_ = 0, inPk_ = 0, ceilSm_ = -1, refDb_ = 0;
+    bool ceilInit_ = false;
+    float refW_ = 0;
+    int64_t refPos_ = 0;
+    std::atomic<const RefAudio*> ref_{nullptr};
     MonitorTap* tap_ = nullptr;
     BarLevels bars_;
     KeyStats passMix_;

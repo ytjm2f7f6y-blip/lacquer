@@ -36,6 +36,7 @@ STATE = _arg("--state")        # None: the mockup. "bare": the plugin's backgrou
                                # needles, nothing lit). "amber" / "green": everything lit, for the lit patches.
 FLIP = _arg("--flip")          # a toggle id to render in its other position
 BORDER = _arg("--border")      # "x,y,w,h" in points: render only this region, to a PNG
+ONLY = _arg("--only")          # with --state amber/green: only this lit group
 
 Z_FRAME = 3.0
 Z_CASS = 4.5
@@ -1103,7 +1104,7 @@ def build_panel(regions=None):
         sc.render.border_min_y, sc.render.border_max_y = 1.0 - (y + h) / L.H, 1.0 - y / L.H
         sc.render.image_settings.file_format = "PNG"
         sc.render.image_settings.color_mode = "RGB"
-        sc.render.filepath = os.path.join(BUILD, f"flip_{FLIP}.png")
+        sc.render.filepath = os.path.join(BUILD, f"flip_{FLIP}.png" if FLIP else f"region_{STATE or 'mockup'}.png")
         bpy.ops.render.render(write_still=True)
         print("wrote", sc.render.filepath)
         return
@@ -1116,6 +1117,8 @@ def build_panel(regions=None):
         sc.render.image_settings.color_mode = "RGB"
         for name, ids in L.LIT_GROUPS.items():
             if (STATE == "green") != name.startswith("key_"):
+                continue
+            if ONLY and name != ONLY:
                 continue
             rects = [L.lit_rect(L.control(i)) for i in ids]
             x0, y0 = min(r[0] for r in rects), min(r[1] for r in rects)

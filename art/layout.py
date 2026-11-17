@@ -229,12 +229,13 @@ READOUTS = [
     {"id": "r_tp", "x": R_, "y": 244, "w": 70, "h": 28, "text": "-1.0", "name": "TRUE PEAK", "sub": "dBTP"},
 ]
 selector("o_listen", L_, 356, "LISTEN ON", ["DESK", "PHONE", "BUDS", "CAR", "CLUB"], spacing=36.0, set_=0, label_r=44.0)
-toggle("o_codec", R_, 348, "ON", "OFF", name="CODEC", set_="down")
+selector("o_stream", R_, 356, "AS STREAMED", ["OFF", "SPOTIFY", "APPLE"], spacing=40.0, set_=0)
 selector("o_dither", L_, 464, "DITHER", ["OFF", "24", "16"], spacing=40.0, set_=1)
 knob("o_monitor", "med", R_, 464, "MONITOR", labels([(0, "-30"), (1, "0")]), ticks=ticks_lin(-30, 0, 5), sub="dB", set_=0.72)
-button("o_before", 976, 566, "BEFORE", w=54, h=22)
-button("o_match", 1046, 566, "MATCHED", w=62, h=22, set_=True)
-button("o_blind", 1118, 566, "BLIND", w=48, h=22)
+# COMPARE: one of three, always at the master's loudness.
+button("o_cmp_mix", 986, 566, "MIX", w=48, h=22)
+button("o_cmp_master", 1047, 566, "MASTER", w=58, h=22, set_=True)
+button("o_cmp_ref", 1108, 566, "REF", w=48, h=22)
 BYPASS_LABEL = {"x": 1047, "y": 590, "text": "COMPARE", "x0": 946, "x1": 1146}
 lamp("power", 1150, 634, 7, "amber", set_=True)
 
@@ -295,7 +296,7 @@ LIT_GROUPS["asst"] = ["a_listen", "a_take"]
 LIT_GROUPS["ideas"] = [f"{c}_idea" for c in ("clean", "tone", "dyn", "col", "st", "loud")]
 LIT_GROUPS["ins"] = [f"{c}_in" for c in ("clean", "tone", "dyn", "col", "st", "loud")]
 LIT_GROUPS["meters"] = ["guarding", "over"]
-LIT_GROUPS["out"] = ["o_before", "o_match", "o_blind"]
+LIT_GROUPS["out"] = ["o_cmp_mix", "o_cmp_master", "o_cmp_ref"]
 LIT_GROUPS["power"] = ["power"]
 LIT_GROUPS["rail"] = ["space_on", "ab_a", "ab_b"]
 
