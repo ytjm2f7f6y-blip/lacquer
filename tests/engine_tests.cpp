@@ -406,6 +406,56 @@ int main() {
         check(d < 1e-5, "and AS STREAMED never reaches a bounce");
     }
 
+    // ---- LOW FIRST: a kick over the ceiling turns the low end down for a moment, not the whole mix
+    {
+        // A kick on every beat, a held bass, and a steady 1 kHz tone 26 dB down that we listen to.
+        const size_t n = size_t(12 * kFs);
+        std::vector<float> L(n), R(n);
+        for (size_t i = 0; i < n; ++i) {
+            const double t = double(i) / kFs, beat = std::fmod(t, 0.5);
+            double k = 0;
+            if (beat < 0.25) k = std::sin(2 * 3.14159265358979 * (55 * beat + 90 / 40.0 * (1 - std::exp(-beat * 40)))) * std::exp(-beat * 9) * 0.6;
+            const double x = k + 0.18 * std::sin(2 * 3.14159265358979 * 41.2 * t) + 0.05 * std::sin(2 * 3.14159265358979 * 1000 * t);
+            L[i] = R[i] = float(x);
+        }
+        auto toneDips = [&](const std::vector<float>& y) {
+            const double w = 2 * 3.14159265358979 * 1000 / kFs, al = std::sin(w) / 16;
+            const double b0 = al, b2 = -al, a0 = 1 + al, a1 = -2 * std::cos(w), a2 = 1 - al;
+            double z[2][4]{}, acc = 0;
+            size_t c = 0;
+            std::vector<double> lv;
+            for (size_t i = 0; i < y.size(); ++i) {
+                double v = y[i];
+                for (int st = 0; st < 2; ++st) { const double o = (b0 * v + b2 * z[st][1] - a1 * z[st][2] - a2 * z[st][3]) / a0; z[st][1] = z[st][0]; z[st][0] = v; z[st][3] = z[st][2]; z[st][2] = o; v = o; }
+                acc += v * v;
+                if (++c == size_t(0.01 * kFs)) { lv.push_back(10 * std::log10(acc / (0.01 * kFs) + 1e-20)); acc = 0; c = 0; }
+            }
+            std::vector<double> tail(lv.end() - 600, lv.end()), srt = tail;
+            std::sort(srt.begin(), srt.end());
+            std::vector<double> d;
+            for (double v : tail) d.push_back(srt[srt.size() / 2] - v);
+            std::sort(d.begin(), d.end());
+            return d[size_t(0.95 * double(d.size() - 1))];
+        };
+        double dips[2], tp[2];
+        for (int on = 0; on < 2; ++on) {
+            std::vector<float> l = L, r = R;
+            lp::Limiter lim;
+            lim.prepare(kFs, kSub);
+            lp::LimParams p;
+            p.gainDb = 6; p.ceilingDb = -1; p.releaseMs = 400; p.character = 0.25f; p.fastMs = 12; p.lookMs = 7; p.osFactor = 4;
+            p.lowFirstDb = on ? 6.0f : 0.0f;
+            for (size_t i = 0; i < n; i += kSub) lim.process(l.data() + i, r.data() + i, kSub, p);
+            dips[on] = toneDips(l);
+            lp::TruePeak tpm;
+            tp[on] = -120;
+            for (size_t i = size_t(2 * kFs); i < n; ++i) tp[on] = std::max(tp[on], lq::gainToDb(tpm.process(l[i])));
+        }
+        check(dips[1] < 0.5 && dips[1] < dips[0] * 0.4 && tp[1] <= -1.0 + 0.1,
+              "LOW FIRST: a kick 6 dB over the ceiling no longer pumps the rest of the mix, and the ceiling holds",
+              "the tone ducks " + num(dips[0], 2) + " dB without it, " + num(dips[1], 2) + " dB with it; true peak " + num(tp[1], 2) + " dBTP");
+    }
+
     // ---- the automatic ceiling: GUARD gives a master louder than -14 LUFS -2 dBTP, as Spotify asks
     {
         auto peakOf = [&](const Run& r) {

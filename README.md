@@ -57,6 +57,12 @@ says how much of the song the figure rests on. The drive is fixed while the song
 the loudness where the limiter starts eating transients (the knee) from the peaks at
 the limiter's own input, after PUNCH and the rest, and won't drive past it. The limiter
 is true-peak, after an optional soft clipper, in three styles: CLEAN, PUNCHY, DENSE.
+Before both, LOW END FIRST splits off everything under 120 Hz: when the low end is what
+pushes a moment over the ceiling (a kick, a bass note's attack), it comes off the low
+end, up to 6 dB, instead of the limiter turning the whole mix down, which is what makes a
+limited mix pump on every kick. A low end that stays over the ceiling loses no more than
+2 dB this way; the limiter takes the rest evenly. In the tests, a kick 6 dB over the
+ceiling ducked a steady tone by 2 dB without it and 0.4 dB with it.
 
 **TONE** has four bands, each +-12 dB: a low shelf (40-250 Hz), a mud bell (120-800 Hz),
 a presence bell (1-6 kHz) and an air shelf (5-18 kHz). The faceplate's knobs set three gains; the

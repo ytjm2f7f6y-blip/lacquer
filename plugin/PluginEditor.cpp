@@ -1157,7 +1157,8 @@ void LacquerEditor::drawDetail(juce::Graphics& g) {
         }
         l2 = "GLUE'S TIMING. A FAST ATTACK TAKES THE FRONT OFF THE HITS";
     } else if (tab == 2) {
-        trace(limHist_, 62, 120, 8, "LIMITER: GAIN REDUCTION");
+        trace(limHist_, 62, 120, 8, lowCutHold_ > 0.1 ? "LIMITER: GAIN REDUCTION   LOW END FIRST " + num1(lowCutHold_) + " dB"
+                                                       : juce::String("LIMITER: GAIN REDUCTION"));
         const auto& mt = proc_.meters();
         ink.text("IN " + num1(mt.inLufs.load()) + "   OUT " + num1(mt.stLufs.load()) + " LUFS   DRIVE " + num1(mt.driveDb.load(), true) + " dB", 366, 131, 10.5f, 2, 0.8f);
         for (int i = 0; i < 2; ++i) {
@@ -1660,6 +1661,7 @@ void LacquerEditor::tick(int frames) {
         glueHist_[histPos_] = m.glueGrMax.exchange(0.0f);
         outPkHold_ = std::max(double(m.truePeak.load()), outPkHold_ - 0.35);
         limHist_[histPos_] = m.limGrMax.exchange(0.0f);
+        lowCutHold_ = std::max(double(m.lowCutMax.exchange(0.0f)), lowCutHold_ - 0.1);
         histPos_ = (histPos_ + 1) % 240;
     }
 }

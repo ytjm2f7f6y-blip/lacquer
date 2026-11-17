@@ -400,13 +400,89 @@ private:
     Ramp wR_, sR_;
 };
 
+// LOW FIRST: before the limiter, the peaks that the low end causes come off the low end, so a kick
+// over the ceiling turns the bass down for a moment, not the whole mix.
+class LowFirst {
+public:
+    void prepare(double fs, double splitHz = 120, double lookMs = 5) {
+        fs_ = fs;
+        slowK_ = 1.0 - std::exp(-1.0 / (0.3 * fs));
+        look_ = std::max(8, int(std::lround(lookMs * 0.001 * fs)));
+        for (int c = 0; c < 2; ++c) { xo_[c].set(splitHz, fs); lo_[c].prepare(size_t(look_ + 8)); hi_[c].prepare(size_t(look_ + 8)); }
+        ring_.assign(size_t(look_ + 8), 1.0);
+        dqI_.assign(size_t(look_ + 16), 0); dqV_.assign(size_t(look_ + 16), 1.0);
+        reset();
+    }
+    void reset() {
+        for (int c = 0; c < 2; ++c) { xo_[c].reset(); lo_[c].clear(); hi_[c].clear(); }
+        std::fill(ring_.begin(), ring_.end(), 1.0); sum_ = double(look_); head_ = tail_ = 0; n_ = 0; env_ = 0; slow_ = 0;
+    }
+    int latency() const { return look_; }
+    // ceil: linear; maxCutDb: the most it takes off the low end; releaseMs: how fast the low end comes back.
+    void process(float* L, float* R, int n, double ceil, double maxCutDb, double releaseMs, double weight) {
+        const double floorG = std::pow(10.0, -maxCutDb / 20.0), rel = std::exp(-1.0 / (releaseMs * 0.001 * fs_));
+        float* ch[2] = {L, R};
+        const size_t qn = dqI_.size(), rn = ring_.size();
+        for (int i = 0; i < n; ++i) {
+            double need = 1.0;
+            for (int c = 0; c < 2; ++c) {
+                double lo, hi;
+                xo_[c].split(ch[c][i], lo, hi);
+                lo_[c].push(float(lo)); hi_[c].push(float(hi));
+                const double s = lo + hi;
+                if (std::abs(s) > ceil && lo * s > 0) {
+                    const double g = ((s > 0 ? ceil : -ceil) - hi) / lo;
+                    need = std::min(need, std::max(floorG, std::min(1.0, g)));
+                }
+            }
+            if (weight < 1) need = 1 - weight * (1 - need);
+            // The lowest need over the window, then averaged over it: the cut is in place before the peak.
+            while (tail_ != head_ && dqV_[(tail_ + qn - 1) % qn] >= need) tail_ = (tail_ + qn - 1) % qn;
+            dqI_[tail_] = n_; dqV_[tail_] = need; tail_ = (tail_ + 1) % qn;
+            while (dqI_[head_] <= n_ - look_) head_ = (head_ + 1) % qn;
+            const double hmin = dqV_[head_];
+            const double old = ring_[size_t((n_ - look_ + int64_t(rn) * 4) % int64_t(rn))];
+            ring_[size_t(n_ % int64_t(rn))] = hmin;
+            sum_ += hmin - old;
+            const double t = -20.0 * std::log10(std::max(1e-9, std::min(1.0, sum_ / look_)));
+            env_ = t > env_ ? t : t + (env_ - t) * rel;
+            // Only the moments: a kick's peak comes off the low end in full, but a low end that stays
+            // over (a held sub) loses at most kHeldDb here, and the limiter takes the rest from the whole.
+            slow_ += (env_ - slow_) * slowK_;
+            const double cut = std::min(env_, kHeldDb + std::max(0.0, env_ - slow_));
+            const double g = std::pow(10.0, -cut / 20.0);
+            for (int c = 0; c < 2; ++c) ch[c][i] = float(lo_[c].tap(size_t(look_ - 1)) * g + hi_[c].tap(size_t(look_ - 1)));
+            ++n_;
+            if ((n_ & 0xFFFF) == 0) { sum_ = 0; for (int k = 0; k < look_; ++k) sum_ += ring_[size_t((n_ - 1 - k + int64_t(rn) * 4) % int64_t(rn))]; }
+            cut_ = std::max(cut_, float(cut));
+        }
+    }
+    float takeCut() { const float c = cut_; cut_ = 0; return c; }
+private:
+    static constexpr double kHeldDb = 2.0;
+    double fs_ = 48000, sum_ = 0, env_ = 0, slow_ = 0, slowK_ = 0;
+    int look_ = 240;
+    LR4 xo_[2];
+    Delay lo_[2], hi_[2];
+    std::vector<double> ring_, dqV_;
+    std::vector<int64_t> dqI_;
+    size_t head_ = 0, tail_ = 0;
+    int64_t n_ = 0;
+    float cut_ = 0;
+};
+
 // ---------------------------------------------------------------------------
 // Limiter: pre-gain, an optional oversampled clip stage, then a lookahead
 // limiter that reads true peaks (4x) and holds a ceiling in dBTP, with a
 // fast and a slow release blended by character.
+#ifndef LQ_LOW_FIRST_DB
+ #define LQ_LOW_FIRST_DB 6
+#endif
 struct LimParams {
     float gainDb = 0, trimDb = 0, releaseMs = 300, character = 0.3f, lookMs = 5, fastMs = 8, clip = 0, clipAmt = 0.2f, link = 0.9f;
     float ceilingDb = -1, ceilingMargin = 0;   // margin (linear) left for dither
+    float slowAttackMs = 30;                    // how quickly the slow release builds up
+    float lowFirstDb = LQ_LOW_FIRST_DB, lowFirstMs = 60;   // LOW FIRST: the most it takes off the low end, how fast it lets go
     int osFactor = 8;
 };
 
@@ -415,6 +491,7 @@ public:
     void prepare(double fs, int maxBlock) {
         fs_ = fs;
         maxLook_ = int(std::lround(0.010 * fs));
+        low_.prepare(fs);
         for (int c = 0; c < 2; ++c) {
             os_[c].prepare(maxBlock);
             clipDry_[c].prepare(size_t(os_[c].latency() + 8 * kSub + 8));
@@ -428,7 +505,7 @@ public:
     }
     void reset() {
         for (int c = 0; c < 2; ++c) {
-            os_[c].reset(); clipDry_[c].clear(); audio_[c].clear(); det_[c].fill(1.0f); tp_[c].reset();
+            os_[c].reset(); clipDry_[c].clear(); audio_[c].clear(); det_[c].fill(1.0f); tp_[c].reset(); low_.reset();
             std::fill(hring_[c].begin(), hring_[c].end(), 1.0);
             hsum_[c] = 0; dqHead_[c] = dqTail_[c] = 0;
             eFast_[c] = eSlow_[c] = 0;
@@ -437,7 +514,8 @@ public:
         gR_.reset(); cR_.reset();
         grMax_ = 0;
     }
-    int latency() const { return os_[0].latency() + maxLook_ + TruePeak::kDelay - 1; }
+    int latency() const { return low_.latency() + os_[0].latency() + maxLook_ + TruePeak::kDelay - 1; }
+    float takeLowCut() { return low_.takeCut(); }
     static void clipStage(double* u, int m, double thr) {
         for (int i = 0; i < m; ++i) {
             const double v = u[i] / thr, av = std::abs(v);
@@ -458,9 +536,12 @@ public:
         // recent input first, so it starts from the real signal (the latency never changes).
         const double thr = ceil * dbToGain(6.0 - 6.0 * p.clipAmt);
         const bool clipLive = p.clip > 0.0f || cR_.cur > 0.0f;
+        // The drive, then LOW FIRST: what the low end pushes over the ceiling comes off the low end.
+        for (int c = 0; c < 2; ++c) for (int i = 0; i < n; ++i) ch[c][i] *= g[i];
+        low_.process(L, R, n, ceil, p.lowFirstDb, p.lowFirstMs, p.lowFirstDb > 0 ? 1.0 : 0.0);
         for (int c = 0; c < 2; ++c) {
             float x[kSub], y[kSub];
-            for (int i = 0; i < n; ++i) x[i] = ch[c][i] * g[i];
+            for (int i = 0; i < n; ++i) x[i] = ch[c][i];
             const size_t lat = size_t(os_[c].latency());
             if (!clipLive) {
                 for (int i = 0; i < n; ++i) { clipDry_[c].push(x[i]); ch[c][i] = clipDry_[c].tap(lat); }
@@ -495,7 +576,7 @@ public:
                 for (int k = 0; k < look; ++k) hsum_[c] += hring_[c][size_t((n_ - 1 - k + int64_t(hring_[c].size()) * 4) % int64_t(hring_[c].size()))];
             }
         }
-        const double rf = tcCoef(p.fastMs * 0.001, fs_), rs = tcCoef(p.releaseMs * 0.001, fs_), sa = tcCoef(0.03, fs_);
+        const double rf = tcCoef(p.fastMs * 0.001, fs_), rs = tcCoef(p.releaseMs * 0.001, fs_), sa = tcCoef(p.slowAttackMs * 0.001, fs_);
         const double chr = p.character;
         const size_t detTap = size_t(maxLook_ - look);
         const size_t audTap = size_t(maxLook_ + TruePeak::kDelay - 1);
@@ -548,6 +629,7 @@ public:
 private:
     double fs_ = 48000;
     int maxLook_ = 480, curLook_ = -1;
+    LowFirst low_;
     Oversampler os_[2];
     Delay clipDry_[2], audio_[2], det_[2];
     TruePeak tp_[2];

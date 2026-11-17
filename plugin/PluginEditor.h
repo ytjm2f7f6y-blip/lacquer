@@ -141,7 +141,7 @@ private:
     int toneBand_ = 1, dragBand_ = -1;   // the DETAIL page's EQ: the picked band, the one being dragged
     float glueHist_[240]{}, limHist_[240]{};
     int histPos_ = 0;
-    double outPkHold_ = -120;
+    double outPkHold_ = -120, lowCutHold_ = 0;
     int bubble_ = -1;                    // a knob's value shown beside it while it turns
     double bubbleUntil_ = 0;
     bool helpOn_ = true;

@@ -84,6 +84,7 @@ struct Meters {
     // The ceiling in force (GUARD lowers it for loud masters); REF's level change; what Spotify and
     // Apple Music would do to the master's level (AS STREAMED).
     std::atomic<float> ceilingDb{-1}, refDb{0}, spotifyDb{0}, appleDb{0}, masterLufs{-70};
+    std::atomic<float> lowCutMax{0};   // LOW FIRST: the most it took off the low end since the window looked
     std::atomic<bool> guarding{false}, over{false}, learning{true}, spaceActive{false};
     std::atomic<int> key{0};
     std::atomic<float> corr{1};
@@ -509,6 +510,8 @@ private:
             const int dith = int(song[oDither]);
             lpm.ceilingMargin = dith == 2 ? float(2.0 / 32768.0) : 0.0f;
             lim_.process(L, R, n, lpm);
+            const float lc = lim_.takeLowCut();
+            if (lc > meters_.lowCutMax.load(std::memory_order_relaxed)) meters_.lowCutMax.store(lc, std::memory_order_relaxed);
             const float lg = lim_.takeGr();
             if (lg > meters_.limGrMax.load(std::memory_order_relaxed)) meters_.limGrMax.store(lg, std::memory_order_relaxed);
             if (dith > 0) dither_.process(L, R, n, 1, dith == 2 ? 16 : 24);
